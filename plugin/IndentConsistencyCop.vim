@@ -114,6 +114,18 @@
 " Maintainer:	Ingo Karkat <ingo@karkat.de>
 "
 " REVISION	DATE		REMARKS {{{1
+"	0.07	02-Nov-2006	BF: Suppressing 'Not buffer setting' option if
+"				the buffer setting is inconsistent ('badset'),
+"				which threw an exception when selected. 
+"	0.06	01-Nov-2006	Corrected unreasonable assumption of a
+"				consistent small indent setting (of 1 or 2
+"				spaces) when actually only some wrong spaces
+"				spoil the consistency. Now, a perfect consistent
+"				rating is only accepted if its absolute rating
+"				number is also the maximum rating. 
+"				BF: Avoiding runtime error in
+"				IndentBufferInconsistencyCop() if s:ratings is
+"				empty. 
 "	0.05	30-Oct-2006	Improved g:indentconsistencycop_non_indent_pattern 
 "				to also allow ' *\t' and ' *****' comments. 
 "	0.04	20-Oct-2006	Improved undo of highlighting;
@@ -598,28 +610,39 @@ function! s:EvaluateOccurrenceAndIncompatibleIntoRating( incompatibles )
 "* PURPOSE:
 "   For each indent setting, calculates a single (unnormalized) rating; the
 "   higher, the more probable the indent setting. 
-"   The formula is rating( indent setting ) = # of indent setting occurrences /
-"   sum( # of occurrences of incompatible indent settings ). 
+"   The formula is 
+"	rating( indent setting ) = # of indent setting occurrences /
+"	    (1 + sum( # of occurrences of incompatible indent settings )). 
+"   If there are no incompatible indent settings, the rating is deemed
+"   "perfect", which is indicated by a negative rating. Apart from multiplying
+"   the result with -1, above formula stays valid:
+"	rating( perfect indent setting ) = -1 * # of indent setting occurrences. 
 "* ASSUMPTIONS / PRECONDITIONS:
 "   s:occurrences dictionary; key: indent setting; value: number of
 "	lines that have that indent setting
 "   s:ratings: empty dictionary
 "* EFFECTS / POSTCONDITIONS:
 "   Fills s:ratings: dictionary of ratings; key: indent setting; value: rating number
-"   -1 means a perfect rating (i.e. no incompatibles)
+"   A negative rating represents a perfect rating (i.e. no incompatibles)
+"   There is at most one perfect rating. 
 "* INPUTS:
 "   a:incompatibles: dictionary of incompatibles
 "* RETURN VALUES: 
 "   none
 "*******************************************************************************
     let s:ratings = {}
+    let l:hasPerfectRatingOccurred = 0
     for l:indentSetting in keys( s:occurrences )
 	let l:incompatibles = a:incompatibles[ l:indentSetting ]
 	if empty( l:incompatibles )
+	    if l:hasPerfectRatingOccurred
+		throw 'assert there is only one perfect rating'
+	    endif
 	    " No incompatibles; this gets the perfect rating. 
-	    let s:ratings[ l:indentSetting ] = -1
+	    let s:ratings[ l:indentSetting ] = -10000 * s:occurrences[ l:indentSetting ] " / 1
+	    let l:hasPerfectRatingOccurred = 1
 	else
-	    let l:incompatibleOccurrences = 0
+	    let l:incompatibleOccurrences = 1
 	    for l:incompatible in l:incompatibles
 		let l:incompatibleOccurrences += s:occurrences[ l:incompatible ]
 	    endfor
@@ -628,18 +651,14 @@ function! s:EvaluateOccurrenceAndIncompatibleIntoRating( incompatibles )
     endfor
 endfunction
 
+"- Rating normalization --------------------------------------------------{{{1
 function! s:IsContainsPerfectRating()
-    let l:perfectCount = count( s:ratings, -1 )
-    if l:perfectCount > 1
-	throw "assert perfectCount <= 1"
-    endif
-    return l:perfectCount == 1
+    return (min( s:ratings ) < 0)
 endfunction
 
-"- Rating normalization --------------------------------------------------{{{1
 function! s:NormalizePerfectRating()
     for l:rating in keys( s:ratings )
-	if s:ratings[ l:rating ] == -1
+	if s:ratings[ l:rating ] < 0
 	    " Normalize to 100%
 	    let s:ratings[ l:rating ] = 100
 	else
@@ -673,6 +692,33 @@ function! s:NormalizeNonPerfectRating()
     endfor
 endfunction
 
+function! s:DemotePerfectRating()
+    for l:rating in keys( s:ratings )
+	if s:ratings[ l:rating ] < 0
+	    let s:ratings[ l:rating ] = -1 * s:ratings[ l:rating ]
+	endif
+    endfor
+endfunction
+
+function! s:IsPerfectRatingAlsoTheBestRating()
+    let l:absolutePerfectRating = -1 * min( s:ratings )
+    if l:absolutePerfectRating <= 0
+	throw 'assert perfect rating < 0'
+    endif
+
+    let l:bestNonPerfectRating = max( s:ratings )
+    if l:bestNonPerfectRating <= 0
+	if -1 * l:bestNonPerfectRating == l:absolutePerfectRating
+	    " There is no other rating than the perfect rating; max() == min().  
+	    return 1
+	else
+	    throw 'assert best rating > 0'
+	endif
+    endif
+"****D echo '**** perfect rating = ' . l:absolutePerfectRating . '; best other rating = ' . l:bestNonPerfectRating
+    return (l:absolutePerfectRating >= l:bestNonPerfectRating)
+endfunction
+
 function! s:NormalizeRatings()
 "*******************************************************************************
 "* PURPOSE:
@@ -695,7 +741,21 @@ function! s:NormalizeRatings()
 "   none
 "*******************************************************************************
     if s:IsContainsPerfectRating()
-	call s:NormalizePerfectRating()
+	" A perfect rating (i.e. an indent setting that is consistent throughout the
+	" entire buffer / range) is only accepted if its absolute rating number is
+	" also the maximum rating. Without this qualification, a few small indent
+	" settings (e.g. sts1, spc2) could be deemed the consistent setting, even
+	" though they actually are just indent errors that sabotage the actual,
+	" larger desired indent setting (e.g. sts4, spc4). In other words, the cop
+	" must not be fooled by some wrong spaces into believing that we have a
+	" consistent sts1, although the vast majority of indents suggests an sts4
+	" with some inconsistencies. 
+	if s:IsPerfectRatingAlsoTheBestRating()
+	    call s:NormalizePerfectRating()
+	else
+	    call s:DemotePerfectRating()
+	    call s:NormalizeNonPerfectRating()
+	endif
     else
 	call s:NormalizeNonPerfectRating()
     endif
@@ -754,6 +814,16 @@ function! s:CheckBufferConsistency( startLineNum, endLineNum ) " {{{1
     call s:EvaluateIndentsIntoOccurrences( s:softtabstops, 'sts' )
     call s:EvaluateIndentsIntoOccurrences( s:doubtful, 'dbt' )
     " Now, the indent occurences have been consolidated into s:occurrences. 
+    " It counts the actual or possible indent settings. An indent of 4 spaces is
+    " counted once as 'spc4', the alternatives of 2x 'spc2' or 4x 'spc1' are
+    " discarded, because only the largest possible unambiguous indent setting wins. 
+    " However, an indent of 30 spaces is counted as both 'spc5' and 'spc6',
+    " because the indent could result from either one. Again, 'spc3', 'spc2' and
+    " 'spc1' are discarded, because they are smaller subsets. 
+    " Thus, the sum of occurences can be larger than the number of actual
+    " indents examined, because some indents can not unambiguously be assigned
+    " to one indent setting. 
+    
 "****D echo 'Tabstops:     ' . string( s:tabstops )
 "****D echo 'Spaces:       ' . string( s:spaces )
 "****D echo 'Softtabstops: ' . string( s:softtabstops )
@@ -778,10 +848,10 @@ function! s:CheckBufferConsistency( startLineNum, endLineNum ) " {{{1
     " The s:ratings dictionary contains the final rating, a combination of high indent settings occurrence and low incompatible occurrences. 
     call s:EvaluateOccurrenceAndIncompatibleIntoRating( l:incompatibles ) " Key: indent setting; value: rating number
 "****D echo 'ratings:     ' . string( s:ratings )
-"****D call confirm('debug')
 
     call s:NormalizeRatings()
 "****D echo 'nrm. ratings:' . string( s:ratings )
+"****D call confirm('debug')
 
 
     " Cleanup lists and dictionaries with script-scope to free memory. 
@@ -1437,35 +1507,48 @@ function! s:IndentBufferInconsistencyCop( startLineNum, endLineNum, inconsistent
 	call s:EchoUserMessage('Be careful when modifying the inconsistent indents! ')
     elseif l:actionNum == 2
 	let l:bufferIndentSetting = s:GetIndentSettingForBufferSettings()
-	let l:ratingLists = items( s:ratings )
-	call sort( l:ratingLists, "s:DictCompareDescending" )
-	let l:bestGuessIndentSetting = l:ratingLists[0][0]
-	let l:isBestGuessEqualToBufferIndent = (l:bestGuessIndentSetting == l:bufferIndentSetting)
+	" The buffer indent settings may be 'badset', which cannot be
+	" highlighted. So we need to suppress this option if it is bad. 
+	let l:isBadBufferIndent = (s:IsBadIndentSetting( l:bufferIndentSetting ) ? 1 : 0)
+
+	let l:isBestGuessEqualToBufferIndent = 1 " Suppress best guess option if no guess available. 
+	if ! empty( s:ratings )
+	    let l:ratingLists = items( s:ratings )
+	    call sort( l:ratingLists, "s:DictCompareDescending" )
+	    let l:bestGuessIndentSetting = l:ratingLists[0][0]
+	    let l:isBestGuessEqualToBufferIndent = (l:bestGuessIndentSetting == l:bufferIndentSetting)
+	endif
 
 	let l:highlightMessage = 'What kind of inconsistent indents do you want to highlight?'
-	if l:isBestGuessEqualToBufferIndent
-	    let l:highlightChoices = "Not &buffer settings / best guess (" . l:bufferIndentSetting . ')'
+	if l:isBestGuessEqualToBufferIndent && l:isBadBufferIndent
+	    let l:highlightChoices = ''
+	elseif l:isBestGuessEqualToBufferIndent && ! l:isBadBufferIndent
+	    let l:highlightChoices = "\nNot &buffer settings / best guess (" . l:bufferIndentSetting . ')'
+	elseif ! l:isBestGuessEqualToBufferIndent && l:isBadBufferIndent
+	    let l:highlightChoices = "\nNot best &guess (" . l:bestGuessIndentSetting . ')'
 	else
-	    let l:highlightChoices = "Not &buffer settings (" . l:bufferIndentSetting . ')'
+	    let l:highlightChoices = "\nNot &buffer settings (" . l:bufferIndentSetting . ')'
 	    let l:highlightChoices .= "\nNot best &guess (" . l:bestGuessIndentSetting . ')'
 	endif
 	let l:highlightChoices .= "\nNot &chosen setting..."
 	if s:GetKeyedValue( s:occurrences, 'badmix' ) + s:GetKeyedValue( s:occurrences, 'badsts' ) > 0
 	    let l:highlightChoices .= "\n&Illegal indents only"
 	endif
-	let l:highlightNum = confirm( l:highlightMessage, l:highlightChoices )
+
+	let l:highlightNum = confirm( l:highlightMessage, strpart( l:highlightChoices, 1 ) )
 	if l:highlightNum <= 0
-	    " User canceled
-	elseif l:highlightNum == 1
+	    " User canceled. 
+	    call s:EchoUserMessage('Be careful when modifying the inconsistent indents! ')
+	elseif l:highlightNum == (1 - l:isBadBufferIndent )
 	    call s:HighlightInconsistentIndents( a:startLineNum, a:endLineNum, l:bufferIndentSetting )
-	elseif l:highlightNum == (2 - l:isBestGuessEqualToBufferIndent)
+	elseif l:highlightNum == (2 - l:isBestGuessEqualToBufferIndent - l:isBadBufferIndent)
 	    call s:HighlightInconsistentIndents( a:startLineNum, a:endLineNum, l:bestGuessIndentSetting )
-	elseif l:highlightNum == (3 - l:isBestGuessEqualToBufferIndent)
+	elseif l:highlightNum == (3 - l:isBestGuessEqualToBufferIndent - l:isBadBufferIndent)
 	    let l:chosenIndentSetting = s:QueryIndentSetting()
 	    if ! empty( l:chosenIndentSetting )
 		call s:HighlightInconsistentIndents( a:startLineNum, a:endLineNum, l:chosenIndentSetting )
 	    endif
-	elseif l:highlightNum == (4 - l:isBestGuessEqualToBufferIndent)
+	elseif l:highlightNum == (4 - l:isBestGuessEqualToBufferIndent - l:isBadBufferIndent)
 	    call s:HighlightInconsistentIndents( a:startLineNum, a:endLineNum, 'notbad' )
 	else
 	    throw 'assert false'
