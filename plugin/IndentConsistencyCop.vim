@@ -79,10 +79,6 @@
 "   correct lines. 
 "
 " LIMITATIONS: {{{1
-" - 'softtabstop' is only recognized correctly when a correct combination of
-"   tabs and spaces is actually used. If a file only has small indents,
-"   resulting in only spaces or tabs (but not the combination), the indent
-"   setting is recognized as a combination of 'tab' and 'spc n'. 
 " - Highlighting of inconsistent and bad indents is static; i.e. when modifying
 "   the buffer / inserting or deleting lines, the highlighting will be wrong /
 "   out of place. You need to re-run the IndentConsistencyCop to fix the
@@ -110,12 +106,33 @@
 "   of 'tab'), by specifying the correct setting in the :IndentConsistencyCop
 "   call. (Overriding is already offered in the cop's dialog.) 
 "
-" Copyright: (C) 2006-2007 by Ingo Karkat
+" Copyright: (C) 2006-2008 by Ingo Karkat
 "   The VIM LICENSE applies to this script; see ':help copyright'. 
 "
 " Maintainer:	Ingo Karkat <ingo@karkat.de>
 "
 " REVISION	DATE		REMARKS {{{1
+"   1.10.011	28-Feb-2008	Improved the algorithm so that 'softtabstop' is
+"				recognized even when a file only has small
+"				indents with either (up to 7) spaces or tabs,
+"				but no tab + space combination. Beforehand, the
+"				s:ApplyPrecedences() was applied too early; the
+"				s:EvaluateIncompatibleIndentSettings() could not
+"				take doubtful indent settings into account. In
+"				addition, s:ApplyPrecedences() always preferred
+"				'spc' when neither 'spc' nor 'sts' indents
+"				existed. Now, it chooses 'sts' when 'tab' does
+"				exist, because tabs indicate the presence of
+"				softtabstops. Precedences are applied after the
+"				incompatible indent settings have been
+"				determined, and must now be applied to both
+"				s:occurrences and s:incompatibles. For this
+"				purpose, s:ApplyPrecedences() has been split
+"				into s:ApplyPrecedencesToOccurrences() and
+"				s:ApplyPrecedencesToIncompatibles(). The latter
+"				thing is a little bit complex, because doubtful
+"				indent settings can be converted to one or two
+"				preferred settings. 
 "   1.00.010	07-Nov-2007	BF: In an inconsistent and large buffer/range
 "				that has only one or a few small inconsistencies
 "				and one dominant (i.e. 99%) setting, the text
@@ -267,7 +284,38 @@ function! s:RemoveKey( dict, key ) " {{{2
 endfunction
 
 function! s:RemoveFromList( list, value ) " {{{2
-    call filter( a:list, 'v:val != "' . a:value . '"' )
+    return filter( a:list, 'v:val != "' . a:value . '"' )
+endfunction
+
+function! s:UniqueReplaceElementWithListContents( list, searchElement, substitutionList ) " {{{2
+"*******************************************************************************
+"* PURPOSE:
+"   Each a:searchElement in a:list is replaced with the elements of
+"   a:substitutionList. Any duplicates which are then in a:list are removed (and
+"   the order of elements gets shuffled), so only unique elements are finally
+"   contained in a:list. 
+"* ASSUMPTIONS / PRECONDITIONS:
+"   none
+"* EFFECTS / POSTCONDITIONS:
+"   none
+"* INPUTS:
+"   a:list		source list
+"   a:searchElement 	element of a:list to be replaced
+"   a:substitutionList	list of elements that replace a:searchElement
+"* RETURN VALUES: 
+"   Modifies a:list in-place, and also returns a:list. 
+"*******************************************************************************
+    let l:hash = {}
+    for l:element in a:list
+	if l:element == a:searchElement
+	    for l:substitutionElement in a:substitutionList
+		let l:hash[l:substitutionElement] = 1
+	    endfor
+	else
+	    let l:hash[l:element] = 1
+	endif
+    endfor
+    return keys( l:hash )
 endfunction
 " }}}2
 
@@ -433,13 +481,13 @@ function! s:EvaluateIndentsIntoOccurrences( dict, type ) " {{{1
     endfor
 endfunction
 
-function! s:ApplyPrecedences() " {{{1
+function! s:RemoveSts8() " {{{1
 "*******************************************************************************
 "* PURPOSE:
-"   Relates individual indent settings to others, thereby "stronger" indent
-"   settings take precedent over "weaker" ones. 
+"   The occurrence 'sts8' has only been collected because of the parallelism
+"   with 'spc8'. Effectively, 'sts8' is the same as 'tab', and is removed. 
 "* ASSUMPTIONS / PRECONDITIONS:
-"   s:occurrences contains consolidated indent occurrences. 
+"   s:occurrences contains raw indent occurrences. 
 "* EFFECTS / POSTCONDITIONS:
 "   Modifies s:occurrences. 
 "* INPUTS:
@@ -447,45 +495,149 @@ function! s:ApplyPrecedences() " {{{1
 "* RETURN VALUES: 
 "   none
 "*******************************************************************************
-    " Space indents of up to 7 spaces can be either softtabstop or space-indent,
-    " and have been collected in the 'dbt n' keys so far. 
-    " If there is only either 'sts n' or 'spc n', the 'dbt n' value is moved to
-    " that key. If both exist, its value is added to both. If both are zero /
-    " non-existing, the 'dbt n' value is moved to 'spc n'; without further
-    " evidence, spaces take precedence over softtabstops. 
-    let l:indentCnt = 8
-    while l:indentCnt > 0
-	let l:dbtKey = 'dbt' . l:indentCnt
-	let l:dbt = s:GetKeyedValue( s:occurrences, l:dbtKey )
-	if l:dbt > 0
-	    let l:spcKey = 'spc' . l:indentCnt
-	    let l:stsKey = 'sts' . l:indentCnt
-	    let l:spc = s:GetKeyedValue( s:occurrences, l:spcKey )
-	    let l:sts = s:GetKeyedValue( s:occurrences, l:stsKey )
-	    if l:spc == 0 && l:sts == 0
-		call s:IncreaseKeyedBy( s:occurrences, l:spcKey, l:dbt )
-	    else
-		if l:spc > 0
-		    call s:IncreaseKeyedBy( s:occurrences, l:spcKey, l:dbt )
-		endif
-		if l:sts > 0
-		    call s:IncreaseKeyedBy( s:occurrences, l:stsKey, l:dbt )
-		endif
-	    endif
-	    call s:RemoveKey( s:occurrences, l:dbtKey )
-	endif
-
-	let l:indentCnt -= 1
-    endwhile
-
-    " The occurrence 'sts8' has only been collected because of the parallelism
-    " with 'spc8'. Effectively, 'sts8' is the same as 'tab', and is removed. 
     if s:GetKeyedValue( s:occurrences, 'sts8' ) != s:GetKeyedValue( s:occurrences, 'tab' )
 	throw 'assert sts8 == tab'
     endif
     call s:RemoveKey( s:occurrences, 'sts8' )
 endfunction
 
+function! s:GetPrecedence(indentSetting) " {{{1
+"*******************************************************************************
+"* PURPOSE:
+"   Converts doubtful indent settings to actual indent settings; the other
+"   actual occurrences influence which indent setting(s) are chosen. 
+"
+"   Space indents of up to 7 spaces can be either softtabstop or space-indent,
+"   and have been collected in the 'dbt n' keys so far. 
+"   If there is only either 'sts n' or 'spc n', the 'dbt n' value is converted to
+"   that key. 
+"   If both exist, it is converted to both 'sts n' and 'spc n'. 
+"   If both are zero / non-existing, the 'dbt n' value is converted to 'sts n'
+"   if tabs are present, else to 'spc n'. (Without tabs as an indication of
+"   softtabstop, spaces take precedence over softtabstops.) 
+"* ASSUMPTIONS / PRECONDITIONS:
+"   s:occurrences contains consolidated indent occurrences, and has not yet had
+"   the precedences applied (via s:ApplyPrecedencesToOccurrences()). 
+"* EFFECTS / POSTCONDITIONS:
+"   none
+"* INPUTS:
+"   a:indentSetting indent setting to be converted. 
+"* RETURN VALUES: 
+"   (Empty list if the passed doubtful indent setting doesn't occur.) 
+"   One-element list of the original indent setting if it is not doubtful
+"   (pass-through to returned list). 
+"   For doubtful indent settings, a list of indent settings; only 'spc' and
+"   'sts' are contained, no 'dbt' is returned. 
+"*******************************************************************************
+    if s:GetSettingFromIndentSetting( a:indentSetting ) != 'dbt'
+	return [a:indentSetting]    " Pass-through. 
+    endif
+    let l:multiplier = s:GetMultiplierFromIndentSetting( a:indentSetting )
+
+    if s:GetKeyedValue( s:occurrences, a:indentSetting ) <= 0
+	return []   " Bad query. 
+    endif
+
+    let l:spcKey = 'spc' . l:multiplier
+    let l:stsKey = 'sts' . l:multiplier
+    let l:spc = s:GetKeyedValue( s:occurrences, l:spcKey )
+    let l:sts = s:GetKeyedValue( s:occurrences, l:stsKey )
+    let l:settings = []
+    if l:spc == 0 && l:sts == 0
+	if s:GetKeyedValue( s:occurrences, 'tab' ) > 0
+	    let l:settings =  [l:stsKey]
+	else
+	    let l:settings =  [l:spcKey]
+	endif
+    else
+	if l:spc > 0
+	    let l:settings = add( l:settings, l:spcKey )
+	endif
+	if l:sts > 0
+	    let l:settings = add( l:settings, l:stsKey )
+	endif
+    endif
+    return l:settings
+endfunction
+
+function! s:ApplyPrecedences() " {{{1
+"*******************************************************************************
+"* PURPOSE:
+"   Replaces doubtful indent settings in the global occurrences and list of
+"   incompatible indent settings with the preferred actual indent setting(s). 
+"* ASSUMPTIONS / PRECONDITIONS:
+"   s:occurrences contains consolidated indent occurrences, and has not yet had
+"   the precedences applied (via s:ApplyPrecedencesToOccurrences()). 
+"* EFFECTS / POSTCONDITIONS:
+"   Modifies s:occurrences; you cannot call s:GetPrecedence() any more!
+"   Modifies s:incompatibles. 
+"* INPUTS:
+"   none
+"* RETURN VALUES: 
+"   none
+"*******************************************************************************
+    let l:indentCnt = 8
+    while l:indentCnt > 0
+	let l:dbtKey = 'dbt' . l:indentCnt
+	let l:settings = s:GetPrecedence( l:dbtKey )
+	call s:ApplyPrecedencesToOccurrences( l:dbtKey, l:settings )
+	call s:ApplyPrecedencesToIncompatibles( l:dbtKey, l:settings )
+
+	let l:indentCnt -= 1
+    endwhile
+endfunction
+
+function! s:ApplyPrecedencesToOccurrences( dbtKey, preferredSettings ) " {{{1
+"*******************************************************************************
+"* PURPOSE:
+"   Replaces a doubtful indent setting and moves the indent setting count with
+"   them. 
+"* ASSUMPTIONS / PRECONDITIONS:
+"   s:occurrences contains consolidated indent occurrences, and has not yet had
+"   the precedences applied (via s:ApplyPrecedencesToOccurrences()). 
+"* EFFECTS / POSTCONDITIONS:
+"   In s:occurrences, moves doubtful indent settings counts to the preferred
+"   indent setting(s), and removes the doubtful indent setting. 
+"* INPUTS:
+"   a:dbtKey    doubtful indent setting to be replaced
+"   a:preferredSettings	list of preferred settings to which the count will be
+"   moved
+"* RETURN VALUES: 
+"   none
+"*******************************************************************************
+    let l:dbt = s:GetKeyedValue( s:occurrences, a:dbtKey )
+    for l:setting in a:preferredSettings
+	call s:IncreaseKeyedBy( s:occurrences, l:setting, l:dbt )
+	call s:RemoveKey( s:occurrences, a:dbtKey )
+    endfor
+endfunction
+
+function! s:ApplyPrecedencesToIncompatibles( dbtKey, preferredSettings ) " {{{1
+"*******************************************************************************
+"* PURPOSE:
+"   Replaces a doubtful indent setting in the list of incompatibles with the
+"   preferred indent setting(s). 
+"* ASSUMPTIONS / PRECONDITIONS:
+"   s:incompatibles contains map of indent settings to their respective
+"   incompatible settings. Key: indent setting; value: list of indent settings. 
+"* EFFECTS / POSTCONDITIONS:
+"   Modifies values of s:incompatibles. 
+"* INPUTS:
+"   a:dbtKey    doubtful indent setting to be replaced
+"   a:preferredSettings	list of preferred settings to which the count will be
+"   moved
+"* RETURN VALUES: 
+"   none
+"*******************************************************************************
+    if empty( a:preferredSettings )
+	return
+    endif
+
+    " Map all values to the preferred settings; remove any duplicates. 
+    for l:key in keys( s:incompatibles )
+	let s:incompatibles[l:key] = s:UniqueReplaceElementWithListContents( s:incompatibles[l:key], a:dbtKey, a:preferredSettings )
+    endfor
+endfunction
 
 "- Check for compatible indent settings ----------------------------------{{{1
 function! s:IsIndentProduceableWithIndentSetting( indent, indentSetting ) " {{{2
@@ -574,7 +726,8 @@ function! s:GetIncompatiblesForIndentSetting( indentSetting ) " {{{2
 "* EFFECTS / POSTCONDITIONS:
 "	? List of the procedure's effect on each external variable, control, or other element.
 "* INPUTS:
-"	? Explanation of each argument that isn't obvious.
+"   a:indentSetting (preferred) indent setting for which the incompatible
+"	settings are calculated. 
 "* RETURN VALUES: 
 "    list of indent settings.
 "*******************************************************************************
@@ -587,21 +740,21 @@ function! s:GetIncompatiblesForIndentSetting( indentSetting ) " {{{2
     if l:setting == 'tab'
 	" 'sts' could be compatible with 'tab'. 
 	" softtabstops must be inspected; doubtful contains indents that are too small (<8) for 'tab'. 
-"****D echo '**** Inspecting for "tab": ' . string( keys( s:softtabstops ) )
 	call s:InspectForCompatibles( l:incompatibles, keys( s:softtabstops ), a:indentSetting, 'sts' )
     elseif l:setting == 'sts'
 	" 'tab' could be compatible with 'sts' if the multipliers are right; tabstops must be inspected. 
-"****D echo '**** Inspecting for "sts": ' . string( keys( s:tabstops ))
 	call s:InspectForCompatibles( l:incompatibles, keys( s:tabstops ), a:indentSetting, 'tab' )
 	" 'spc' is incompatible
+	" 'dbt' could be compatible with 'sts' if the multipliers are right; doubtful must be inspected. 
+	call s:InspectForCompatibles( l:incompatibles, keys( s:doubtful ), a:indentSetting, 'dbt' )
 	" Other 'sts' multipliers could be compatible; softtabstops and doubtful must be inspected. 
-"****D echo '**** Inspecting for "sts": ' . string( keys( s:softtabstops ) + keys( s:doubtful ))
 	call s:InspectForCompatibles( l:incompatibles, keys( s:softtabstops ) + keys( s:doubtful ), a:indentSetting, 'sts' )
     elseif l:setting == 'spc'
 	" 'tab' is incompatible. 
 	" 'sts' is incompatible. 
+	" 'dbt' could be compatible with 'spc' if the multipliers are right; doubtful must be inspected. 
+	call s:InspectForCompatibles( l:incompatibles, keys( s:doubtful ), a:indentSetting, 'dbt' )
 	" Other 'spc' multipliers could be compatible; spaces and doubtful must be inspected. 
-"****D echo '**** Inspecting for "spc": ' . string( keys( s:spaces ) + keys( s:doubtful ))
 	call s:InspectForCompatibles( l:incompatibles, keys( s:spaces ) + keys( s:doubtful ), a:indentSetting, 'spc' )
     elseif l:setting == 'bad'
 	" for bad, all are incompatible. 
@@ -620,20 +773,39 @@ function! s:EvaluateIncompatibleIndentSettings() " {{{2
 "   s:softtabstops and s:doubtful are 12 and 24 (but not 6, 18)). To do this
 "   evaluation, the actual indents in s:spaces, s:softtabstops and s:doubtful
 "   must be inspected. 
+"   The list of incompatible indent settings (returned values) contains doubtful
+"   settings (which still need to be converted), because for the elimination of
+"   incompatibles, different indent collections must be inspected for doubtful
+"   vs. 'spc' / 'sts' settings. To build up the correct initial list of
+"   incompatibles, s:occurrences must contain the raw settings, i.e. including
+"   doubtful ones. 
+"   In contrast, the key indent setting is already a preferred setting; it
+"   cannot be converted later on because for the determination of incompatible
+"   settings, the actual setting must be known.
+"   Example: Occurrences of 'tab', 'dbt2', 'spc8'
+"	'tab': ['dbt2', 'spc8'], 'dbt2': [], 'spc8': ['tab', 'dbt2']
+"   would lead to wrong result 'consistent sts2' ('sts' is preferred because
+"   'tab' exists), even though 'sts2' is inconsistent with 'spc8'. 
+"   Correct evaluation is:
+"	'tab': ['dbt2', 'spc8'], 'sts2': ['spc8'], 'spc8': ['tab', 'dbt2']
+"   'sts' is incompatible with 'spc', 'dbt' would be compatible. 
+"
 "* ASSUMPTIONS / PRECONDITIONS:
 "   s:occurrences dictionary; key: indent setting; value: number of
 "	lines that have that indent setting
+"   s:occurrences still contains the raw settings, i.e. including doubtful ones. 
 "* EFFECTS / POSTCONDITIONS:
-"	? List of the procedure's effect on each external variable, control, or other element.
+"   none
 "* INPUTS:
-"	? Explanation of each argument that isn't obvious.; value: list of
-"	indent settings. 
+"   none
 "* RETURN VALUES: 
 "    Key: indent setting; value: list of indent settings.
 "*******************************************************************************
     let l:incompatibles = {}
     for l:indentSetting in keys( s:occurrences )
-	let l:incompatibles[ l:indentSetting ] = s:GetIncompatiblesForIndentSetting( l:indentSetting )
+	for l:preferredSetting in s:GetPrecedence( l:indentSetting )
+	    let l:incompatibles[ l:preferredSetting ] = s:GetIncompatiblesForIndentSetting( l:preferredSetting )
+	endfor
     endfor
     return l:incompatibles
 endfunction
@@ -830,7 +1002,7 @@ function! s:CheckBufferConsistency( startLineNum, endLineNum ) " {{{1
     " is the basis for all evaluations and statistics. 
     let s:occurrences = {}  " key: indent setting (e.g. 'sts4'); value: number of lines that have that indent setting. 
 
-    " These intermediate dictionaries will be processed into s:occurences via
+    " These intermediate dictionaries will be processed into s:occurrences via
     " EvaluateIndentsIntoOccurrences(). 
     let s:tabstops = {}	    " key: number of indent spaces (8*n); value: number of lines that have the number of indent spaces. 
     let s:spaces = {}	    " key: number of indent spaces (>=8); value: number of lines that have the number of indent spaces. 
@@ -848,42 +1020,44 @@ function! s:CheckBufferConsistency( startLineNum, endLineNum ) " {{{1
     " s:occurrences. 
     call s:EvaluateIndentsIntoOccurrences( s:spaces, 'spc' )
     call s:EvaluateIndentsIntoOccurrences( s:softtabstops, 'sts' )
+    call s:RemoveSts8()
     call s:EvaluateIndentsIntoOccurrences( s:doubtful, 'dbt' )
-    " Now, the indent occurences have been consolidated into s:occurrences. 
+    " Now, the indent occurrences have been consolidated into s:occurrences. 
     " It counts the actual or possible indent settings. An indent of 4 spaces is
     " counted once as 'spc4', the alternatives of 2x 'spc2' or 4x 'spc1' are
     " discarded, because only the largest possible unambiguous indent setting wins. 
     " However, an indent of 30 spaces is counted as both 'spc5' and 'spc6',
     " because the indent could result from either one. Again, 'spc3', 'spc2' and
     " 'spc1' are discarded, because they are smaller subsets. 
-    " Thus, the sum of occurences can be larger than the number of actual
+    " Thus, the sum of occurrences can be larger than the number of actual
     " indents examined, because some indents can not unambiguously be assigned
     " to one indent setting. 
     
+"****D echo 'Max. indent:  ' . s:indentMax
 "****D echo 'Tabstops:     ' . string( s:tabstops )
 "****D echo 'Spaces:       ' . string( s:spaces )
 "****D echo 'Softtabstops: ' . string( s:softtabstops )
 "****D echo 'Doubtful:     ' . string( s:doubtful )
-"****D echo 'Occurrences 1:' . string( s:occurrences )
-"****D echo 'Max. indent:  ' . s:indentMax
+"****D echo 'Raw Occurr.   ' . string( s:occurrences )
 
     if empty( s:occurrences )
 	return -1
     endif
 
-    call s:ApplyPrecedences()
-
-"****D echo 'Occurrences 2:' . string( s:occurrences )
 "****D echo 'This is probably a ' . string( filter( copy( s:occurrences ), 'v:val == max( s:occurrences )') )
 
     " This dictionary contains the incompatible indent settings for each indent
     " setting. 
-    let l:incompatibles = s:EvaluateIncompatibleIndentSettings() " Key: indent setting; value: list of indent settings. 
-"****D echo 'Incompatibles:' . string( l:incompatibles )
+    let s:incompatibles = s:EvaluateIncompatibleIndentSettings() " Key: indent setting; value: list of indent settings. 
+"****D echo 'Raw Incomp.:  ' . string( s:incompatibles )
+
+    call s:ApplyPrecedences()
+"****D echo 'Occurrences:  ' . string( s:occurrences )
+"****D echo 'Incompatibles:' . string( s:incompatibles )
 
     " The s:ratings dictionary contains the final rating, a combination of high indent settings occurrence and low incompatible occurrences. 
-    call s:EvaluateOccurrenceAndIncompatibleIntoRating( l:incompatibles ) " Key: indent setting; value: rating number
-"****D echo 'ratings:     ' . string( s:ratings )
+    call s:EvaluateOccurrenceAndIncompatibleIntoRating( s:incompatibles ) " Key: indent setting; value: rating number
+"****D echo 'Ratings:      ' . string( s:ratings )
 
     call s:NormalizeRatings()
 "****D echo 'nrm. ratings:' . string( s:ratings )
@@ -896,6 +1070,7 @@ function! s:CheckBufferConsistency( startLineNum, endLineNum ) " {{{1
     call filter( s:softtabstops, 0 )
     call filter( s:doubtful, 0 )
     " Do not free s:indentMax, it is still accessed by s:IsEnoughIndentForSolidAssessment(). 
+    call filter( s:incompatibles, 0 )
 
     let l:isConsistent = (count( s:ratings, 100 ) == 1)
     return l:isConsistent
