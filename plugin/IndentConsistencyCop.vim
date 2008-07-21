@@ -78,6 +78,45 @@
 "   jumps to the first error, uses the 'Error' highlighting and folds away the
 "   correct lines. 
 "
+" INTEGRATION:
+"   The :IndentConsistencyCop and :IndentRangeConsistencyCop commands fill a
+"   buffer-scoped dictionary with the results of the check. These results can be
+"   consumed by other VIM integrations (e.g. for a custom 'statusline'). 
+"
+"	b:indentconsistencycop_result.maxIndent
+"   Maximum indent (in columns) found in the entire buffer. (Not reduced by
+"   range checks.) 
+"
+"	b:indentconsistencycop_result.indentSetting
+"   String representing the actual indent settings. Consistent indent settings
+"   are represented by 'tabN', 'spcN', 'stsN' (where N is the indent
+"   multiplier) or 'none' (meaning no indent found in buffer). Completely
+"   inconsistent indent settings are shown as 'XXX'; a setting which is almost
+"   consistent, with only some bad mix of spaces and tabs, is represented by
+"   'BADtabN', 'BADspcN' or 'BADstsN'. 
+"
+"	b:indentconsistencycop_result.isConsistent
+"   Flag whether the indent in the entire buffer is consistent. (Not set by
+"   range checks.)
+"
+"	b:indentconsistencycop_result.isDefinite
+"   Flag whether there has been enough indent to make a definite judgement about
+"   the buffer indent settings. (Not set by range checks.)
+"
+"	b:indentconsistencycop_result.bufferSettings
+"   String representing the buffer settings. One of 'tabN', 'spcN', 'stsN'
+"   (where N is the indent multiplier), or '???' (meaning inconsistent buffer
+"   indent settings). 
+"
+"	b:indentconsistencycop_result.isBufferSettingsConsistent
+"   Flag whether the buffer indent settings (tabstop, softtabstop, shiftwidth,
+"   expandtab) are consistent with each other.  
+"
+"	b:indentconsistencycop_result.isConsistentWithBufferSettings
+"   Flag whether the indent in the entire buffer is consistent with the buffer
+"   indent settings. (Not set by range checks; :IndentRangeConsistencyCop leaves
+"   this flag unchanged.) 
+"
 " LIMITATIONS: {{{1
 " - Highlighting of inconsistent and bad indents is static; i.e. when modifying
 "   the buffer / inserting or deleting lines, the highlighting will be wrong /
@@ -112,6 +151,42 @@
 " Maintainer:	Ingo Karkat <ingo@karkat.de>
 "
 " REVISION	DATE		REMARKS {{{1
+"   1.20.016	19-Jul-2008	BF: If different settings have been chosen by
+"				the user ("Wrong, choose correct setting"), this
+"				may have resulted in a consistency with buffer
+"				settings, too. Added call to
+"				s:ReportConsistencyWithBufferSettingsResult(). 
+"   1.20.015	18-Jul-2008	ENH: Completed b:indentconsistencycop_result
+"				dictionary with indent and buffer settings
+"				identifiers. For that, introduced
+"				s:perfectIndentSetting and
+"				s:authoritativeIndentSetting. Refactored Rating
+"				generation and normalization so that a perfect
+"				rating is not represented by a negative number;
+"				this simplified the logic. 
+"				RF: In s:...BufferIndentConsistencyCop(), only
+"				passing either a:startLineNum/a:endLineNum or
+"				a:isEntireBuffer, not both. 
+"				RF: Cleaning up dictionaries with script scope
+"				by assigning empty dictionary instead of
+"				filter()ing out all elements. 
+"				Consistency is now determined by checking
+"				s:perfectIndentSetting, not searching for 100%
+"				rating in s:ratings, which should be
+"				unsusceptible to rounding errors in s:ratings. 
+"   1.20.014	08-Jul-2008	ENH: Added b:indentconsistencycop_result
+"				buffer-scoped dictionary containing the results
+"				of the check, which can be used by other
+"				integrations. 
+"				Do not evaluate indents into occurrences if no
+"				indents found. 
+"   1.20.013	07-Jul-2008	Also check consistency of buffer settings if the
+"				buffer/range does not contain indented text.
+"				Inconsistent indent settings can then be
+"				corrected with a queried setting. 
+"				Testcase: IndentBufferConsistencyCop56.txt
+"				BF: Clear previous highlighting if buffer/range
+"				now does not contain indented text. 
 "   1.10.012	13-Jun-2008	Added -bar to all commands that do not take any
 "				arguments, so that these can be chained together. 
 "   1.10.011	28-Feb-2008	Improved the algorithm so that 'softtabstop' is
@@ -143,7 +218,7 @@
 "				s:RatingsToUserString(), enhanced the condition
 "				for this user message: When there's only one
 "				rating, others certainly have been dropped. 
-"				Testcase: IndentBufferConsistencyCop70.txt
+"				Testcase: IndentBufferConsistencyCop54.txt
 "				ENH: In s:CheckConsistencyWithBufferSettings(), 
 "				print "noexpandtab/expandtab" instead of "
 "				expandtab to 0/1", as the user would :setlocal
@@ -341,6 +416,10 @@ endfunction
 
 function! s:GetSettingFromIndentSetting( indentSetting ) " {{{2
     return strpart( a:indentSetting, 0, 3 )
+endfunction
+
+function! s:IsBadIndentSetting( indentSetting ) " {{{2
+    return s:GetSettingFromIndentSetting( a:indentSetting ) == 'bad'
 endfunction
 
 " }}}1
@@ -823,110 +902,94 @@ function! s:EvaluateOccurrenceAndIncompatibleIntoRating( incompatibles ) " {{{2
 "	rating( indent setting ) = # of indent setting occurrences /
 "	    (1 + sum( # of occurrences of incompatible indent settings )). 
 "   If there are no incompatible indent settings, the rating is deemed
-"   "perfect", which is indicated by a negative rating. Apart from multiplying
-"   the result with -1, above formula stays valid:
-"	rating( perfect indent setting ) = -1 * # of indent setting occurrences. 
+"   "perfect", and the indent setting is stored in s:perfectIndentSetting. 
+"   If there is (are? - no, there can only be) one indent setting that is only
+"   incompatible with bad indent settings, this is deemed the "authoritative"
+"   indent setting, even though it isn't perfect. It is stored in
+"   s:authoritativeIndentSetting. 
 "* ASSUMPTIONS / PRECONDITIONS:
 "   s:occurrences dictionary; key: indent setting; value: number of
 "	lines that have that indent setting
-"   s:ratings: empty dictionary
 "* EFFECTS / POSTCONDITIONS:
 "   Fills s:ratings: dictionary of ratings; key: indent setting; value: rating number
-"   A negative rating represents a perfect rating (i.e. no incompatibles)
-"   There is at most one perfect rating. 
+"   s:perfectIndentSetting can contain indent setting. 
+"   s:authoritativeIndentSetting can contain indent setting, but not both at the
+"   same time. 
+"   There is either one perfect rating, or one authoritative rating, or neither. 
 "* INPUTS:
 "   a:incompatibles: dictionary of incompatibles
 "* RETURN VALUES: 
 "   none
 "*******************************************************************************
     let s:ratings = {}
-    let l:hasPerfectRatingOccurred = 0
+    let s:perfectIndentSetting = ''
+    let s:authoritativeIndentSetting = ''
+
     for l:indentSetting in keys( s:occurrences )
 	let l:incompatibles = a:incompatibles[ l:indentSetting ]
+	let l:incompatibleOccurrences = 1
+	for l:incompatible in l:incompatibles
+	    let l:incompatibleOccurrences += s:occurrences[ l:incompatible ]
+	endfor
+	let s:ratings[ l:indentSetting ] = 10000 * s:occurrences[ l:indentSetting ] / l:incompatibleOccurrences
+
 	if empty( l:incompatibles )
-	    if l:hasPerfectRatingOccurred
-		throw 'assert there is only one perfect rating'
-	    endif
-	    " No incompatibles; this gets the perfect rating. 
-	    let s:ratings[ l:indentSetting ] = -10000 * s:occurrences[ l:indentSetting ] " / 1
-	    let l:hasPerfectRatingOccurred = 1
-	else
-	    let l:incompatibleOccurrences = 1
-	    for l:incompatible in l:incompatibles
-		let l:incompatibleOccurrences += s:occurrences[ l:incompatible ]
-	    endfor
-	    let s:ratings[ l:indentSetting ] = 10000 * s:occurrences[ l:indentSetting ] / l:incompatibleOccurrences
+	    " This is a perfect indent setting. 
+	    if ! empty( s:perfectIndentSetting ) | throw 'assert there is only one perfect indent setting. ' | endif
+	    let s:perfectIndentSetting = l:indentSetting
+	elseif empty( filter( copy( l:incompatibles ), '! s:IsBadIndentSetting(v:val)' ) )
+	    " This is an authoritative indent setting. 
+	    if ! empty( s:authoritativeIndentSetting ) | throw 'assert there is only one authoritative indent setting. ' | endif
+	    if ! empty( s:perfectIndentSetting ) | throw 'assert there can only be either a perfect or an authoritative indent setting. ' | endif
+	    let s:authoritativeIndentSetting = l:indentSetting
 	endif
     endfor
 endfunction
 " }}}2
 
 "- Rating normalization --------------------------------------------------{{{1
-function! s:IsContainsPerfectRating() " {{{2
-    return (min( s:ratings ) < 0)
-endfunction
-
 function! s:NormalizePerfectRating() " {{{2
-    for l:rating in keys( s:ratings )
-	if s:ratings[ l:rating ] < 0
-	    " Normalize to 100%
-	    let s:ratings[ l:rating ] = 100
-	else
-	    unlet s:ratings[ l:rating ] 
-	endif
-    endfor
+    " Remove every non-perfect rating. 
+    call filter( s:ratings, 'v:key == s:perfectIndentSetting' )
+
+    " Normalize to 100%
+    let s:ratings[ s:perfectIndentSetting ] = 100
 endfunction
 
-function! s:IsBadIndentSetting( indentSetting ) " {{{2
-    return s:GetSettingFromIndentSetting( a:indentSetting ) == 'bad'
-endfunction
-
-function! s:NormalizeNonPerfectRating() " {{{2
-    let l:ratingThreshold = 10	" Remove everything below this percentage. Exception: indent setting 'bad'. 
-
+function! s:GetRawRatingsSum() "{{{2
     let l:valueSum = 0
     for l:value in values( s:ratings )
 	let l:valueSum += l:value
     endfor
-    if l:valueSum <= 0 
-	throw 'assert valueSum > 0'
-    endif
+    if l:valueSum <= 0 | throw 'assert valueSum > 0' | endif
+    return l:valueSum
+endfunction
 
-    for l:rating in keys( s:ratings )
-	let l:newRating = 100 * s:ratings[ l:rating ] / l:valueSum
-	if l:newRating < l:ratingThreshold && ! s:IsBadIndentSetting( l:rating )
-	    unlet s:ratings[ l:rating ] 
+function! s:NormalizeAuthoritativeRating() " {{{2
+    " Remove every rating except the authoritative and bad indent settings. 
+    let l:rawRatingsSum = s:GetRawRatingsSum()
+    for l:indentSetting in keys( s:ratings )
+	let l:newRating = 100 * s:ratings[ l:indentSetting ] / l:rawRatingsSum
+	if l:indentSetting == s:authoritativeIndentSetting || s:IsBadIndentSetting( l:indentSetting )
+	    let s:ratings[ l:indentSetting ] = l:newRating
 	else
-	    let s:ratings[ l:rating ] = l:newRating
+	    unlet s:ratings[ l:indentSetting ] 
 	endif
     endfor
 endfunction
 
-function! s:DemotePerfectRating() " {{{2
-    for l:rating in keys( s:ratings )
-	if s:ratings[ l:rating ] < 0
-	    let s:ratings[ l:rating ] = -1 * s:ratings[ l:rating ]
+function! s:NormalizeNonPerfectRating() " {{{2
+    let l:ratingThreshold = 10	" Remove everything below this percentage. Exception: bad indent settings. 
+
+    let l:rawRatingsSum = s:GetRawRatingsSum()
+    for l:indentSetting in keys( s:ratings )
+	let l:newRating = 100 * s:ratings[ l:indentSetting ] / l:rawRatingsSum
+	if l:newRating < l:ratingThreshold && ! s:IsBadIndentSetting( l:indentSetting )
+	    unlet s:ratings[ l:indentSetting ] 
+	else
+	    let s:ratings[ l:indentSetting ] = l:newRating
 	endif
     endfor
-endfunction
-
-function! s:IsPerfectRatingAlsoTheBestRating() " {{{2
-    let l:absolutePerfectRating = -1 * min( s:ratings )
-    if l:absolutePerfectRating <= 0
-	throw 'assert perfect rating < 0'
-    endif
-
-    let l:bestNonPerfectRating = max( s:ratings )
-    if l:bestNonPerfectRating <= 0
-	if -1 * l:bestNonPerfectRating == l:absolutePerfectRating
-	    " There is no other rating than the perfect rating; max() == min().  
-	    return 1
-	else
-	    throw 'assert best rating > 0'
-	endif
-    endif
-"****D echo '**** perfect rating = ' . l:absolutePerfectRating . '; best other rating = ' . l:bestNonPerfectRating
-    return (l:absolutePerfectRating >= l:bestNonPerfectRating)
 endfunction
 
 function! s:NormalizeRatings() " {{{2
@@ -934,39 +997,50 @@ function! s:NormalizeRatings() " {{{2
 "* PURPOSE:
 "   Changes the values in the s:ratings dictionary so that the sum of all values
 "   is 100; i.e. make percentages out of the ratings. 
-"   Values below a certain percentage threshold are dropped from the dictionary
-"   *after* the normalization, in order to remove clutter when displaying the
-"   results to the user. 
+"   Depending on whether a s:perfectIndentSetting or
+"   s:authoritativeIndentSetting has been detected, other elements may be
+"   dropped from the s:ratings dictionary, if these stand up to scrutiny. 
+"   On the other hand, normalization can also demote a perfect or authoritative
+"   rating. 
+"   If there is no perfect or authoritative indent setting, values below a
+"   certain percentage threshold are dropped from the dictionary *after* the
+"   normalization, in order to remove clutter when displaying the results to the
+"   user. 
 "* ASSUMPTIONS / PRECONDITIONS:
 "   s:ratings dictionary; key: indent setting; value: raw rating number; 
-"	-1 * raw rating number means a perfect rating (i.e. no incompatibles)
+"   s:perfectIndentSetting represents perfect indent setting, if such exists. 
+"   s:authoritativeIndentSetting represents authoritative indent setting, if such exists. 
 "* EFFECTS / POSTCONDITIONS:
-"   s:ratings dictionary; key: indent setting; value: percentage 
-"	rating (100: checked range is consistent; < 100: inconsistent. 
+"   s:ratings dictionary; key: indent setting; value: percentage rating
+"   (100: checked range is consistent; < 100: inconsistent). 
 "   Modifies values in s:ratings. 
-"   Removes entries that fall below the threshold. 
+"   Removes elements from s:ratings that fall below a threshold or that are
+"   driven out by an authoritative setting. 
+"   May clear s:perfectIndentSetting and s:authoritativeIndentSetting. 
 "* INPUTS:
 "   none
 "* RETURN VALUES: 
 "   none
 "*******************************************************************************
-    if s:IsContainsPerfectRating()
-	" A perfect rating (i.e. an indent setting that is consistent throughout the
-	" entire buffer / range) is only accepted if its absolute rating number is
-	" also the maximum rating. Without this qualification, a few small indent
-	" settings (e.g. sts1, spc2) could be deemed the consistent setting, even
-	" though they actually are just indent errors that sabotage the actual,
-	" larger desired indent setting (e.g. sts4, spc4). In other words, the cop
-	" must not be fooled by some wrong spaces into believing that we have a
-	" consistent sts1, although the vast majority of indents suggests an sts4
-	" with some inconsistencies. 
-	if s:IsPerfectRatingAlsoTheBestRating()
-	    call s:NormalizePerfectRating()
-	else
-	    call s:DemotePerfectRating()
-	    call s:NormalizeNonPerfectRating()
-	endif
+    " A perfect or authoritative rating (i.e. an indent setting that is
+    " consistent throughout the entire buffer / range) is only accepted if its
+    " absolute rating number is also the maximum rating. Without this
+    " qualification, a few small indent settings (e.g. sts1, spc2) could be
+    " deemed the consistent setting, even though they actually are just indent
+    " errors that sabotage the actual, larger desired indent setting (e.g. sts4,
+    " spc4). In other words, the cop must not be fooled by some wrong spaces
+    " into believing that we have a consistent sts1, although the vast majority
+    " of indents suggests an sts4 with some inconsistencies. 
+    if ! empty(s:perfectIndentSetting) && s:perfectIndentSetting == s:GetBestRatedIndentSetting()
+	call s:NormalizePerfectRating()
+    elseif ! empty(s:authoritativeIndentSetting) && s:authoritativeIndentSetting == s:GetBestRatedIndentSetting()
+	call s:NormalizeAuthoritativeRating()
     else
+	" Any perfect or authoritative ratings didn't pass the majority rule, so
+	" clear them here to signal a definite inconsistency. 
+	let s:perfectIndentSetting = ''
+	let s:authoritativeIndentSetting = ''
+
 	call s:NormalizeNonPerfectRating()
     endif
 endfunction
@@ -983,8 +1057,8 @@ function! s:CheckBufferConsistency( startLineNum, endLineNum ) " {{{1
 "* EFFECTS / POSTCONDITIONS:
 "   Fills the s:occurrences dictionary; key: indent setting; value: number of
 "	lines that have that indent setting
-"   Fills the s:ratings dictionary; key: indent setting; value: raw rating
-"   number, or -1 means a perfect rating (i.e. no incompatibles)
+"   Fills the s:ratings dictionary; key: indent setting; value: rating
+"   percentage (with low percentages removed). 
 "* INPUTS:
 "   a:startLineNum
 "   a:endLineNum
@@ -1017,6 +1091,11 @@ function! s:CheckBufferConsistency( startLineNum, endLineNum ) " {{{1
 	let l:lineNum += 1
     endwhile
 
+    " No need to continue if no indents were found. 
+    if s:indentMax == 0
+	return -1
+    endif
+
     " s:tabstops need not be evaluated into occurrences, as there are no
     " multiplicity ambiguities. The tabstops have already been counted in
     " s:occurrences. 
@@ -1043,7 +1122,7 @@ function! s:CheckBufferConsistency( startLineNum, endLineNum ) " {{{1
 "****D echo 'Raw Occurr.   ' . string( s:occurrences )
 
     if empty( s:occurrences )
-	return -1
+	throw 'Should have returned already, because s:indentMax == 0.'
     endif
 
 "****D echo 'This is probably a ' . string( filter( copy( s:occurrences ), 'v:val == max( s:occurrences )') )
@@ -1059,22 +1138,26 @@ function! s:CheckBufferConsistency( startLineNum, endLineNum ) " {{{1
 
     " The s:ratings dictionary contains the final rating, a combination of high indent settings occurrence and low incompatible occurrences. 
     call s:EvaluateOccurrenceAndIncompatibleIntoRating( s:incompatibles ) " Key: indent setting; value: rating number
-"****D echo 'Ratings:      ' . string( s:ratings )
+"****D echo 'Raw   Ratings:' . string( s:ratings )
+"****D let l:debugIndentSettings = s:perfectIndentSetting . s:authoritativeIndentSetting | if ! empty(l:debugIndentSettings) | echo 'Found' (empty(s:perfectIndentSetting) ? 'authoritative' : 'perfect') 'indent setting before normalization. ' | endif
 
     call s:NormalizeRatings()
-"****D echo 'nrm. ratings:' . string( s:ratings )
+"****D echo 'Norm. Ratings:' . string( s:ratings )
+"****D let l:debugIndentSettings = s:perfectIndentSetting . s:authoritativeIndentSetting | if ! empty(l:debugIndentSettings) | echo '  ...' (empty(s:perfectIndentSetting) ? 'authoritative' : 'perfect') 'indent setting after normalization. ' | endif
 "****D call confirm('debug')
 
 
-    " Cleanup lists and dictionaries with script-scope to free memory. 
-    call filter( s:tabstops, 0 )
-    call filter( s:spaces, 0 )
-    call filter( s:softtabstops, 0 )
-    call filter( s:doubtful, 0 )
+    " Cleanup dictionaries with script-scope to free memory. 
+    let s:tabstops = {}
+    let s:spaces = {}
+    let s:softtabstops = {}
+    let s:doubtful = {}
     " Do not free s:indentMax, it is still accessed by s:IsEnoughIndentForSolidAssessment(). 
-    call filter( s:incompatibles, 0 )
+    let s:incompatibles = {}
+    " Do not free s:ratings, it is still accessed by s:IndentConsistencyCop(). 
 
-    let l:isConsistent = (count( s:ratings, 100 ) == 1)
+    let l:isConsistent = ! empty( s:perfectIndentSetting )
+    if l:isConsistent && (count( s:ratings, 100 ) != 1) | throw 'assert if consistent, there should be a 100% rating. ' | endif
     return l:isConsistent
 endfunction
 
@@ -1271,6 +1354,9 @@ function! s:CheckConsistencyWithBufferSettings( indentSetting ) " {{{2
 	return l:userString
     endif
 endfunction " }}}2
+function! s:IsConsistentWithBufferSettings( indentSetting ) " {{{2
+    return empty( s:CheckConsistencyWithBufferSettings( a:indentSetting ) )
+endfunction
 
 function! s:MakeBufferSettingsConsistentWith( indentSetting ) " {{{2
     let &l:tabstop    = s:GetCorrectTabstopSetting( a:indentSetting )
@@ -1282,7 +1368,7 @@ endfunction
 " }}}1
 
 "- output functions -------------------------------------------------------{{{1
-function! s:EchoStartupMessage( lineCnt, scopeUserString ) " {{{2
+function! s:EchoStartupMessage( lineCnt, isEntireBuffer ) " {{{2
     " When the IndentConsistencyCop is triggered by through autocmds
     " (IndentConsistencyCopAutoCmds.vim), the newly created buffer is not yet
     " displayed. To allow the user to see what text IndentConsistencyCop is
@@ -1294,7 +1380,7 @@ function! s:EchoStartupMessage( lineCnt, scopeUserString ) " {{{2
     " right now. But we only print the message for large files to avoid the
     " 'Press ENTER to continue' VIM prompt. 
     if a:lineCnt > 2000 " empirical value
-	echo 'IndentConsistencyCop is investigating ' . a:scopeUserString . '...'
+	echo 'IndentConsistencyCop is investigating ' . s:GetScopeUserString(a:isEntireBuffer) . '...'
     endif
 endfunction
 
@@ -1347,6 +1433,32 @@ function! s:DictCompareDescending( i1, i2 ) " {{{2
     return a:i1[1] == a:i2[1] ? 0 : a:i1[1] > a:i2[1] ? -1 : 1
 endfunction
 
+function! s:GetSortedRatingList() "{{{2
+"*******************************************************************************
+"* PURPOSE:
+"   Transforms s:ratings into a list of [ indent setting, rating value ] lists
+"   which are sorted from highest to lowest rating. 
+"* ASSUMPTIONS / PRECONDITIONS:
+"   s:ratings is a dictionary that contains numerical values. 
+"* EFFECTS / POSTCONDITIONS:
+"   none
+"* INPUTS:
+"   none
+"* RETURN VALUES: 
+"   sorted list of [ indent setting, rating value ] lists
+"*******************************************************************************
+    " In order to output the ratings from highest to lowest, we need to
+    " convert the ratings dictionary to a list and sort it with a custom
+    " comparator which considers the value part of each list element. 
+    " There is no built-in sort() function for dictionaries. 
+    let l:ratingLists = items( s:ratings )
+    return sort( l:ratingLists, 's:DictCompareDescending' )
+endfunction
+
+function! s:GetBestRatedIndentSetting() "{{{2
+    return (empty(s:ratings) ? '' : s:GetSortedRatingList()[0][0])
+endfunction
+
 function! s:RatingsToUserString( lineCnt ) " {{{2
 "*******************************************************************************
 "* PURPOSE:
@@ -1369,17 +1481,11 @@ function! s:RatingsToUserString( lineCnt ) " {{{2
     let l:isBufferIndentSettingInRatings = 0
     let l:userString = ''
 
-    " In order to output the ratings from highest to lowest, we need to
-    " convert the ratings dictionary to a list and sort it with a custom
-    " comparator which considers the value part of each list element. 
-    " There is no built-in sort() function for dictionaries. 
-    let l:ratingLists = items( s:ratings )
-    call sort( l:ratingLists, "s:DictCompareDescending" )
     let l:ratingSum = 0
-    for l:ratingList in l:ratingLists
+    for l:ratingList in s:GetSortedRatingList()
 	let l:indentSetting = l:ratingList[0]
 	let l:userString .= "\n- " . s:IndentSettingToUserString( l:indentSetting ) . ' (' . s:occurrences[ l:indentSetting ] . ' of ' . a:lineCnt . ' lines)'
-	"**** let l:rating = l:ratingLists[1] = s:ratings[ l:indentSetting ]
+	"**** let l:rating = l:ratingList[1] = s:ratings[ l:indentSetting ]
 	if l:indentSetting == l:bufferIndentSetting
 	    let l:userString .= ' <- buffer setting'
 	    let l:isBufferIndentSettingInRatings = 1
@@ -1418,9 +1524,66 @@ function! s:GetInsufficientIndentUserMessage() " {{{2
 	return "\nWarning: The maximum indent of " . s:indentMax . ' is too small for a solid assessment. '
     endif
 endfunction
-" }}}2
 
-function! s:IndentBufferConsistencyCop( startLineNum, endLineNum, scopeUserString, consistentIndentSetting, isBufferSettingsCheck ) " {{{1
+function! s:GetScopeUserString( isEntireBuffer ) " {{{2
+    return (a:isEntireBuffer ? 'buffer' : 'range')
+endfunction
+
+" }}}2
+" }}}1
+
+"- buffer consistency cops ------------------------------------------------{{{1
+function! s:IsEntireBuffer( startLineNum, endLineNum ) "{{{2
+    return (a:startLineNum == 1 && a:endLineNum == line('$'))
+endfunction
+
+function! s:UnindentedBufferConsistencyCop( isEntireBuffer, isBufferSettingsCheck ) " {{{2
+"*******************************************************************************
+"* PURPOSE:
+"   Reports that the buffer does not contain indentation and (if desired)
+"   triggers the consistency check with the buffer indent settings, thereby
+"   interacting with the user. 
+"* ASSUMPTIONS / PRECONDITIONS:
+"	? List of any external variable, control, or other element whose state affects this procedure.
+"* EFFECTS / POSTCONDITIONS:
+"	? List of the procedure's effect on each external variable, control, or other element.
+"* INPUTS:
+"   a:isEntireBuffer:	flag whether complete buffer or limited range is checked
+"   a:isBufferSettingsCheck: flag whether consistency with the buffer
+"	settings should also be checked. 
+"* RETURN VALUES: 
+"   none
+"*******************************************************************************
+    let l:userMessage = ''
+    if a:isBufferSettingsCheck
+	let l:userMessage = s:CheckBufferSettingsConsistency()
+	if ! empty( l:userMessage )
+	    let l:userMessage = 'This ' . s:GetScopeUserString(a:isEntireBuffer) . ' does not contain indented text. ' . l:userMessage
+	    let l:userMessage .= "\nHow do you want to deal with the inconsistency?"
+	    let l:actionNum = confirm( l:userMessage, "&Ignore\n&Correct setting..." )
+	    if l:actionNum <= 1
+		call s:PrintBufferSettings( 'The buffer settings remain inconsistent: ' )
+	    elseif l:actionNum == 2
+		let l:chosenIndentSetting = s:QueryIndentSetting()
+		if ! empty( l:chosenIndentSetting )
+		    call s:MakeBufferSettingsConsistentWith( l:chosenIndentSetting )
+		    call s:ReportConsistencyWithBufferSettingsResult( a:isEntireBuffer, 1 )
+		    call s:ReportBufferSettingsConsistency( l:chosenIndentSetting )
+		    call s:PrintBufferSettings( 'The buffer settings have been changed: ' )
+		else
+		    call s:PrintBufferSettings( 'The buffer settings remain inconsistent: ' )
+		endif
+	    else
+		throw 'assert false'
+	    endif
+	endif
+    endif
+    if empty( l:userMessage )
+	call s:EchoUserMessage( 'This ' . s:GetScopeUserString(a:isEntireBuffer) . ' does not contain indented text. ' )
+    endif
+endfunction
+" }}}2
+function! s:IndentBufferConsistencyCop( startLineNum, endLineNum, consistentIndentSetting, isBufferSettingsCheck ) " {{{2
 "*******************************************************************************
 "* PURPOSE:
 "   Reports buffer consistency and (if desired) triggers the consistency check
@@ -1432,7 +1595,6 @@ function! s:IndentBufferConsistencyCop( startLineNum, endLineNum, scopeUserStrin
 "* INPUTS:
 "   a:startLineNum, a:endLineNum: range in the current buffer that was to be
 "	checked. 
-"   a:scopeUserString: either 'range' or 'buffer'
 "   a:consistentIndentSetting: determined consistent indent setting of the
 "      buffer
 "   a:isBufferSettingsCheck: flag whether consistency with the buffer
@@ -1442,21 +1604,27 @@ function! s:IndentBufferConsistencyCop( startLineNum, endLineNum, scopeUserStrin
 "*******************************************************************************
     let l:userMessage = ''
     if a:isBufferSettingsCheck
+	let l:isEntireBuffer = s:IsEntireBuffer(a:startLineNum, a:endLineNum)
 	let l:userMessage = s:CheckConsistencyWithBufferSettings( a:consistentIndentSetting )
+	call s:ReportConsistencyWithBufferSettingsResult( l:isEntireBuffer, empty(l:userMessage) )
 	if ! empty( l:userMessage )
 	    let l:userMessage .= "\nHow do you want to deal with the "
-	    let l:userMessage .= ( s:IsEnoughIndentForSolidAssessment() ? '' : 'potential ')
+	    let l:userMessage .= (s:IsEnoughIndentForSolidAssessment() ? '' : 'potential ')
 	    let l:userMessage .= 'inconsistency?'
 	    let l:actionNum = confirm( l:userMessage, "&Ignore\n&Change\n&Wrong, choose correct setting..." )
 	    if l:actionNum <= 1
-		call s:PrintBufferSettings( 'The buffer settings remain inconsistent: ' )
+		call s:PrintBufferSettings( 'The buffer settings remain ' . (s:IsEnoughIndentForSolidAssessment() ? 'inconsistent' : 'at') . ': ' )
 	    elseif l:actionNum == 2
 		call s:MakeBufferSettingsConsistentWith( a:consistentIndentSetting )
+		call s:ReportConsistencyWithBufferSettingsResult( l:isEntireBuffer, 1 )
+		call s:ReportBufferSettingsConsistency( a:consistentIndentSetting )
 		call s:PrintBufferSettings( 'The buffer settings have been changed: ' )
 	    elseif l:actionNum == 3
 		let l:chosenIndentSetting = s:QueryIndentSetting()
 		if ! empty( l:chosenIndentSetting )
 		    call s:HighlightInconsistentIndents( a:startLineNum, a:endLineNum, l:chosenIndentSetting )
+		else
+		    call s:PrintBufferSettings( 'The buffer settings remain ' . (s:IsEnoughIndentForSolidAssessment() ? 'inconsistent' : 'at') . ': ' )
 		endif
 	    else
 		throw 'assert false'
@@ -1464,11 +1632,11 @@ function! s:IndentBufferConsistencyCop( startLineNum, endLineNum, scopeUserStrin
 	endif
     endif
     if empty( l:userMessage )
-	call s:EchoUserMessage( 'This ' . a:scopeUserString . " uses '" . s:IndentSettingToUserString( a:consistentIndentSetting ) . "' consistently. " )
+	call s:EchoUserMessage( 'This ' . s:GetScopeUserString(l:isEntireBuffer) . " uses '" . s:IndentSettingToUserString( a:consistentIndentSetting ) . "' consistently. " )
     endif
 endfunction
+" }}}2
 " }}}1
-
 
 "- highlight functions-----------------------------------------------------{{{1
 function! s:IsLineCorrect( lineNum, correctIndentSetting ) " {{{2
@@ -1672,13 +1840,26 @@ function! s:HighlightInconsistentIndents( startLineNum, endLineNum, correctInden
     " Another benefit of storing the line numbers versus creating a pattern is
     " that this allows different methods of visualization (highlighting,
     " folding, quickfix, ...).
+    let l:isEntireBuffer = s:IsEntireBuffer(a:startLineNum, a:endLineNum)
     let l:lineNumbers = s:GetInconsistentIndents( a:startLineNum, a:endLineNum, a:correctIndentSetting )
     if len( l:lineNumbers ) == 0
 	" All lines are correct. 
 	call s:ClearHighlighting()
+	let s:perfectIndentSetting = a:correctIndentSetting " Update the consistency rating. 
+	let s:authoritativeIndentSetting = ''
+
+	" Update report, now that we have found out that the range / buffer has consistent indent. 
+	call s:ReportConsistencyWithBufferSettingsResult( l:isEntireBuffer, s:IsConsistentWithBufferSettings(a:correctIndentSetting) )	" If different settings have been chosen by the user, this may have resulted in a consistency with buffer settings, too. 
+	call s:ReportConsistencyResult( l:isEntireBuffer, 1, a:correctIndentSetting )
+
 	call s:EchoUserMessage("No incorrect lines found for setting '" . s:IndentSettingToUserString( a:correctIndentSetting ) . "'!")
     else
 	call s:SetHighlighting( l:lineNumbers )
+	let s:perfectIndentSetting = ''	" Invalidate the consistency rating. 
+
+	" Update report, now that we have found out the range / buffer has inconsistent indent. 
+	call s:ReportConsistencyResult( l:isEntireBuffer, 0, '' )
+
 	call s:EchoUserMessage( 'Marked ' . len( l:lineNumbers ) . ' incorrect lines. ' )
     endif
 endfunction
@@ -1717,6 +1898,99 @@ function! s:QueryIndentSetting() " {{{2
     endif
 endfunction
 " }}}2
+" }}}1
+
+"- reporting functions-----------------------------------------------------{{{1
+function! s:InitResults() "{{{2
+    if ! exists('b:indentconsistencycop_result')
+	let b:indentconsistencycop_result = {}
+    endif
+endfunction
+
+function! s:ReportIndentSetting( indentSetting ) "{{{2
+    if a:indentSetting == 'tab'
+	" Internally, there is only one 'tab' indent setting; the actual indent
+	" mulitplier (as specified by the 'tabstop' setting) isn't important. 
+	" For reporting, we want to include this information, however. 
+	return a:indentSetting . &l:tabstop
+    elseif a:indentSetting == 'badset'
+	" Translate the internal 'badset' to something more meaningful to the
+	" user. 
+	return '???'
+    else
+	return a:indentSetting
+    endif
+endfunction
+
+function! s:ReportBufferSettingsConsistency( indentSetting ) "{{{2
+"*******************************************************************************
+"* PURPOSE:
+"	? What the procedure does (not how).
+"* ASSUMPTIONS / PRECONDITIONS:
+"	? List of any external variable, control, or other element whose state affects this procedure.
+"* EFFECTS / POSTCONDITIONS:
+"	? List of the procedure's effect on each external variable, control, or other element.
+"* INPUTS:
+"   a:indentSetting (optional) indent setting that has been set in the buffer. 
+"		    If set, it'll be validated against the actual buffer
+"		    settings. 
+"* RETURN VALUES: 
+"   none
+"*******************************************************************************
+    let l:indentSetting = s:GetIndentSettingForBufferSettings()
+    if ! empty(a:indentSetting) && a:indentSetting != l:indentSetting
+	throw 'assert that passed buffer settings are equal to actual indent settings. '
+    endif
+    let b:indentconsistencycop_result.bufferSettings = s:ReportIndentSetting(l:indentSetting)
+    let b:indentconsistencycop_result.isBufferSettingsConsistent = s:IsBufferSettingsConsistent()
+endfunction
+
+function! s:ReportConsistencyWithBufferSettingsResult( isEntireBuffer, isConsistent ) "{{{2
+    if a:isEntireBuffer || (! a:isConsistent && s:IsEnoughIndentForSolidAssessment())
+	let b:indentconsistencycop_result.isConsistentWithBufferSettings = a:isConsistent
+    endif
+endfunction
+
+function! s:ReportInconsistentIndentSetting()	"{{{2
+    if ! empty( s:perfectIndentSetting ) | throw 'assert should be inconsistent when called. ' | endif
+    if empty( s:authoritativeIndentSetting )
+	" There is a true inconsistency. 
+	return 'XXX'
+    else
+	" There is an authoritative indent setting; only some bad mix of spaces
+	" and tabs have occured. 
+	return 'BAD' . s:ReportIndentSetting(s:authoritativeIndentSetting)
+    endif
+endfunction
+
+function! s:ReportConsistencyResult( isEntireBuffer, isConsistent, consistentIndentSetting ) "{{{2
+    call s:InitResults()
+
+    " Only update the buffer result if the entire buffer was checked or if the
+    " check of a range yielded a definitive inconsistency. 
+    if a:isEntireBuffer || (a:isConsistent == 0 && s:IsEnoughIndentForSolidAssessment())
+	let b:indentconsistencycop_result.isConsistent = (a:isConsistent != 0)
+	let b:indentconsistencycop_result.isDefinite = s:IsEnoughIndentForSolidAssessment()
+
+	if a:isConsistent == 1
+	    if ! empty(a:consistentIndentSetting)
+		let b:indentconsistencycop_result.indentSetting = s:ReportIndentSetting(a:consistentIndentSetting)
+	    endif
+	elseif a:isConsistent == 0
+	    let b:indentconsistencycop_result.indentSetting = s:ReportInconsistentIndentSetting()
+	elseif a:isConsistent == -1
+	    let b:indentconsistencycop_result.indentSetting = 'none'
+	else
+	    throw 'assert invalid a:isConsistent'
+	endif
+    endif
+    " Update if the entire buffer was checked. Range checks are only allowed to
+    " increase this. 
+    if a:isEntireBuffer || (s:indentMax > get(b:indentconsistencycop_result, 'maxIndent', -1))
+	let b:indentconsistencycop_result.maxIndent = s:indentMax
+    endif
+endfunction
+" }}}1
 
 function! s:IndentBufferInconsistencyCop( startLineNum, endLineNum, inconsistentIndentationMessage ) " {{{1
 "*******************************************************************************
@@ -1749,9 +2023,7 @@ function! s:IndentBufferInconsistencyCop( startLineNum, endLineNum, inconsistent
 
 	let l:isBestGuessEqualToBufferIndent = 1 " Suppress best guess option if no guess available. 
 	if ! empty( s:ratings )
-	    let l:ratingLists = items( s:ratings )
-	    call sort( l:ratingLists, "s:DictCompareDescending" )
-	    let l:bestGuessIndentSetting = l:ratingLists[0][0]
+	    let l:bestGuessIndentSetting = s:GetBestRatedIndentSetting()
 	    let l:isBestGuessEqualToBufferIndent = (l:bestGuessIndentSetting == l:bufferIndentSetting)
 	endif
 
@@ -1856,46 +2128,54 @@ function! s:IndentConsistencyCop( startLineNum, endLineNum, isBufferSettingsChec
 "* RETURN VALUES: 
 "   none
 "*******************************************************************************
-    let l:isEntireBuffer = ( a:startLineNum == 1 && a:endLineNum == line('$') )
-    let l:scopeUserString = (l:isEntireBuffer ? 'buffer' : 'range')
+    let l:isEntireBuffer = s:IsEntireBuffer(a:startLineNum, a:endLineNum)
     let l:lineCnt = a:endLineNum - a:startLineNum + 1
 
-    call s:EchoStartupMessage( l:lineCnt, l:scopeUserString )
+    call s:EchoStartupMessage( l:lineCnt, l:isEntireBuffer )
 
     let s:occurrences = {}
     let s:ratings = {}
     let l:isConsistent = s:CheckBufferConsistency( a:startLineNum, a:endLineNum )
+    call s:ReportConsistencyResult( l:isEntireBuffer, l:isConsistent, '' )
+    call s:ReportBufferSettingsConsistency('')
 
     if l:isConsistent == -1
-	call s:EchoUserMessage( 'This ' . l:scopeUserString . ' does not contain indented text. ' )
+	call s:ClearHighlighting()
+	call s:UnindentedBufferConsistencyCop( l:isEntireBuffer, a:isBufferSettingsCheck )
+	call s:ReportConsistencyWithBufferSettingsResult( l:isEntireBuffer, 1 )
     elseif l:isConsistent == 0
-	if a:isBufferSettingsCheck && s:IsBufferConsistentWithBufferSettings( a:startLineNum, a:endLineNum )
-	    call s:ClearHighlighting()
+	if a:isBufferSettingsCheck 
+	    let l:isBufferConsistentWithBufferSettings = s:IsBufferConsistentWithBufferSettings( a:startLineNum, a:endLineNum )
+	    call s:ReportConsistencyWithBufferSettingsResult( l:isEntireBuffer, l:isBufferConsistentWithBufferSettings )
+	    if l:isBufferConsistentWithBufferSettings
+		call s:ClearHighlighting()
 
-	    let l:consistentIndentSetting = s:GetIndentSettingForBufferSettings()
-	    call s:IndentBufferConsistencyCop( a:startLineNum, a:endLineNum, l:scopeUserString, l:consistentIndentSetting, 0 ) " Pass isBufferSettingsCheck = 0 here (though a:isBufferSettingsCheck == 1) because we've already ensured that the buffer is consistent with the buffer settings. 
-	else
-	    let l:inconsistentIndentationMessage = 'Found ' . ( s:IsEnoughIndentForSolidAssessment() ? '' : 'potentially ')
-	    let l:inconsistentIndentationMessage .= 'inconsistent indentation in this ' . l:scopeUserString . '; generated from these conflicting settings: ' 
-	    let l:inconsistentIndentationMessage .= s:RatingsToUserString( l:lineCnt )
-	    let l:inconsistentIndentationMessage .= s:GetInsufficientIndentUserMessage()
-	    call s:IndentBufferInconsistencyCop( a:startLineNum, a:endLineNum, l:inconsistentIndentationMessage )
+		let l:consistentIndentSetting = s:GetIndentSettingForBufferSettings()
+		call s:ReportConsistencyResult( l:isEntireBuffer, l:isConsistent, l:consistentIndentSetting )	" Update report, now that the verdict has been turned around and we have the consistent indent setting. 
+		call s:IndentBufferConsistencyCop( a:startLineNum, a:endLineNum, l:consistentIndentSetting, 0 ) " Pass isBufferSettingsCheck = 0 here (though a:isBufferSettingsCheck == 1) because we've already ensured that the buffer is consistent with the buffer settings. 
+	    else
+		let l:inconsistentIndentationMessage = 'Found ' . ( s:IsEnoughIndentForSolidAssessment() ? '' : 'potentially ')
+		let l:inconsistentIndentationMessage .= 'inconsistent indentation in this ' . s:GetScopeUserString(l:isEntireBuffer) . '; generated from these conflicting settings: ' 
+		let l:inconsistentIndentationMessage .= s:RatingsToUserString( l:lineCnt )
+		let l:inconsistentIndentationMessage .= s:GetInsufficientIndentUserMessage()
+		call s:IndentBufferInconsistencyCop( a:startLineNum, a:endLineNum, l:inconsistentIndentationMessage )
+	    endif
 	endif
     elseif l:isConsistent == 1
 	call s:ClearHighlighting()
 
-	let l:consistentIndentSetting = keys( s:ratings )[0]
-	call s:IndentBufferConsistencyCop( a:startLineNum, a:endLineNum, l:scopeUserString, l:consistentIndentSetting, a:isBufferSettingsCheck )
+	call s:ReportConsistencyResult( l:isEntireBuffer, l:isConsistent, s:perfectIndentSetting )	" Update report, now that we have the consistent (perfect) indent setting. 
+	call s:IndentBufferConsistencyCop( a:startLineNum, a:endLineNum, s:perfectIndentSetting, a:isBufferSettingsCheck )
     else
 	throw 'assert false'
     endif
 "****D echo 'Consistent   ? ' . l:isConsistent
 "****D echo 'Occurrences:   ' . string( s:occurrences )
-"****D echo 'nrm. ratings:  ' . string( s:ratings )
+"****D echo 'Nrm. Ratings:  ' . string( s:ratings )
 
-    " Cleanup variables with script-scope. 
-    call filter( s:occurrences, 0 )
-    call filter( s:ratings, 0 )
+    " Cleanup remaining dictionaries with script-scope to free memory. 
+    let s:occurrences = {}
+    let s:ratings = {}
 endfunction
 
 " }}}1
