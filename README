@@ -53,6 +53,9 @@ RELATED WORKS
   loading the buffer and optionally also on each write. 
 - Indent Finder (vimscript #513) is a Python script and Vim plugin that scans
   any loaded buffer and configures the appropriate indent settings. 
+- yaifa.vim (vimscript #3096) is a port to vimscript of the above. 
+- detectindent.vim (https://github.com/ciaranm/detectindent) by Ciaran
+  McCreesh tries to auto-detect the indentation settings. 
 
 USAGE
 Start the examination of the current buffer or range via: 
