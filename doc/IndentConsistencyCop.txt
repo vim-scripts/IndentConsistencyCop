@@ -71,10 +71,13 @@ RELATED WORKS								     *
 - yaifa.vim (vimscript #3096) is a port to vimscript of the above.
 - detectindent.vim (https://github.com/ciaranm/detectindent) by Ciaran
   McCreesh tries to auto-detect the indentation settings.
+- GuessIndent (vimscript #4251) is based on detectindent.vim
 - indentdetect.vim
   (https://github.com/ervandew/vimfiles/blob/master/vim/plugin/indentdetect.vim)
   by Eric Van Dewoestine performs a simple detection and can set defaults
   based on the filespec.
+- matchindent.vim (vimscript #4066) detects tabs, 2 and 4-space indents and
+  adapts the indent settings accordingly.
 
 ==============================================================================
 USAGE						  *IndentConsistencyCop-usage*
@@ -99,10 +102,10 @@ instead of :IndentConsistencyCop.
 INSTALLATION				   *IndentConsistencyCop-installation*
 
 This script is packaged as a |vimball|. If you have the "gunzip" decompressor
-in your PATH, simply edit the *.vba.gz package in Vim; otherwise, decompress
+in your PATH, simply edit the *.vmb.gz package in Vim; otherwise, decompress
 the archive first, e.g. using WinZip. Inside Vim, install by sourcing the
 vimball or via the |:UseVimball| command. >
-    vim IndentConsistencyCop.vba.gz
+    vim IndentConsistencyCop*.vmb.gz
     :so %
 To uninstall, use the |:RmVimball| command.
 
@@ -158,13 +161,18 @@ removes these additional whitespaces from the indent when evaluating lines. >
 <
 ==============================================================================
 INTEGRATION				    *IndentConsistencyCop-integration*
-
+					       *b:indentconsistencycop_result*
 The :IndentConsistencyCop and :IndentRangeConsistencyCop commands fill a
 buffer-scoped dictionary with the results of the check. These results can be
 consumed by other Vim integrations (e.g. for a custom 'statusline').
 >
     b:indentconsistencycop_result.maxIndent
 Maximum indent (in columns) found in the entire buffer. (Not reduced by range
+checks.)
+>
+    b:indentconsistencycop_result.minIndent
+Minimum indent (in columns, not counting lines that do not start with
+whitespace at all) found in the entire buffer. (Not increased by range
 checks.)
 >
     b:indentconsistencycop_result.indentSetting
@@ -240,6 +248,18 @@ IDEAS						  *IndentConsistencyCop-ideas*
 
 ==============================================================================
 HISTORY						*IndentConsistencyCop-history*
+
+1.40	11-Oct-2012
+- The cop can often do a solid assessment when the maximum indent is 8.
+  Only when there are no smaller indents, a higher indent is needed to
+  unequivocally recognize soft tabstops.
+- ENH: Better handle integer overflow when rating and normalizing: Limit to
+  MAX_INT instead of carrying on with negative ratings, or just use Float
+  values when Vim has support for it.
+- When we have only a few, widely indented lines, there may be more than one
+  way to interpret them as a perfect setting. Choose one over the other via
+  some simple heuristics instead of the previous assertion error.
+- FIX: Fall back to the old :2match when matchadd() is not available.
 
 1.31	03-Apr-2012
 - Use matchadd() instead of :2match to avoid clashes with user highlightings
