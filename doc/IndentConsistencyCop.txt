@@ -78,6 +78,10 @@ RELATED WORKS								     *
   based on the filespec.
 - matchindent.vim (vimscript #4066) detects tabs, 2 and 4-space indents and
   adapts the indent settings accordingly.
+- sleuth.vim (vimscript #4375) by Tim Pope automatically adjusts 'shiftwidth'
+  and 'tabstop' heuristically (via a simplistic sampling that does not check
+  for bad or inconsistent indents) or by looking at other files of the same
+  type.
 
 ==============================================================================
 USAGE						  *IndentConsistencyCop-usage*
@@ -157,7 +161,7 @@ and C/C++ programs: >
 The IndentConsistencyCop would be confused by these special indents, so the
 non-indent pattern defined in g:indentconsistencycop_non_indent_pattern
 removes these additional whitespaces from the indent when evaluating lines. >
-    let g:indentconsistencycop_non_indent_pattern = ' \*[*/ \t]'
+    let g:indentconsistencycop_non_indent_pattern = ' \*\%([*/ \t]\|$\)'
 <
 ==============================================================================
 INTEGRATION				    *IndentConsistencyCop-integration*
@@ -248,6 +252,12 @@ IDEAS						  *IndentConsistencyCop-ideas*
 
 ==============================================================================
 HISTORY						*IndentConsistencyCop-history*
+
+1.43	19-Dec-2013
+- Minor: Make matchstr() robust against 'ignorecase'.
+- Improve g:indentconsistencycop_non_indent_pattern to also handle empty
+  comment lines with a sole ' *' prefix. Thanks to Marcelo Montu for reporting
+  this.
 
 1.42	10-Dec-2012
 When a perfect or authoritative rating didn't pass the majority rule, try to
@@ -365,8 +375,8 @@ First published version.
 Started development.
 
 ==============================================================================
-Copyright: (C) 2006-2012 Ingo Karkat
-The VIM LICENSE applies to this script; see |copyright|.
+Copyright: (C) 2006-2013 Ingo Karkat
+The VIM LICENSE applies to this plugin; see |copyright|.
 
 Maintainer:	Ingo Karkat <ingo@karkat.de>
 ==============================================================================
