@@ -2037,7 +2037,7 @@ function! s:ReportBufferSettingsConsistency( indentSetting ) "{{{2
 "*******************************************************************************
     let l:indentSetting = s:GetIndentSettingForBufferSettings()
     if ! empty(a:indentSetting) && a:indentSetting != l:indentSetting
-	"throw 'ASSERT: Passed buffer settings are equal to actual indent settings. '
+	throw 'ASSERT: Passed buffer settings are equal to actual indent settings. '
     endif
     let b:indentconsistencycop_result.bufferSettings = s:ReportIndentSetting(l:indentSetting)
     let b:indentconsistencycop_result.isBufferSettingsConsistent = s:IsBufferSettingsConsistent()
