@@ -2,12 +2,51 @@
 "
 " DEPENDENCIES:
 "
-" Copyright: (C) 2006-2012 Ingo Karkat
+" Copyright: (C) 2006-2014 Ingo Karkat
 "   The VIM LICENSE applies to this script; see ':help copyright'.
 "
 " Maintainer:	Ingo Karkat <ingo@karkat.de>
 "
 " REVISION	DATE		REMARKS  {{{1
+"   1.44.012	08-Jan-2014	Move workaround of forcing old regexp engine to
+"				s:GetBeginningWhitespace().
+"				ENH: Close all consistent parts of the buffer
+"				when highlighting the inconsistencies via
+"				folding, and restore the original 'foldlevel'
+"				setting (and therefore the global fold state
+"				set by zM / zR) on :IndentConsistencyCopOff.
+"				Thanks to Marcelo Montu for the idea.
+"				ENH: Enable folding to highlight the
+"				inconsistencies when it was previously :set
+"				nofoldenable'd.
+"				Minor: Made IndentConsistencyCopFoldExpr() an
+"				autoload function.
+"   1.43.011	14-Jun-2013	Minor: Make matchstr() robust against
+"				'ignorecase'.
+"   1.42.027	10-Dec-2012	When a perfect or authoritative rating didn't
+"				pass the majority rule (inside
+"				s:NormalizeRatings()), try to turn around the
+"				verdict by checking consistency with buffer
+"				settings
+"				(s:IsBufferConsistentWithBufferSettings()), as
+"				is done for small indents only. For example,
+"				this avoids a wrong verdict of inconsistent spc8
+"				when there are more spc8 than spc4. Cp.
+"				test068-test070. Thanks to Marcelo Montu for
+"				reporting this issue.
+"   1.41.026	07-Dec-2012	Change the behavior of
+"				:IndentRangeConsistencyCop to consider the
+"				buffer settings to turn around the verdict of
+"				"inconsistent indent" (but still not report
+"				inconsistent buffer settings alone). Otherwise,
+"				together with the IndentConsistencyCopAutoCmds
+"				triggers, it can happen that on opening (i.e.
+"				:IndentConsistencyCop), the file is judged okay
+"				(considering the buffer settings), but on
+"				writing the buffer (:IndentRangeConsistencyCop),
+"				a potential inconsistency due to too small
+"				indent is reported. Thanks to Marcelo Montu for
+"				reporting this issue.
 "   1.40.025	10-Oct-2012	The cop can often do a solid assessment when the
 "				maximum indent is 8. Only when there are no
 "				smaller indents, a higher indent is needed to
@@ -326,8 +365,15 @@ function! s:CountBadMixOfSpacesAndTabs( string ) " {{{2
     call s:IncreaseKeyed( s:occurrences, 'badmix')
 endfunction
 
+if exists('+regexpengine') " {{{2
+    " XXX: The new NFA-based regexp engine has a problem with the default
+    " pattern; cp. http://article.gmane.org/gmane.editors.vim.devel/43712
+    let s:beginningWhitespacePrefix = '\%#=1'
+else
+    let s:beginningWhitespacePrefix = ''
+endif
 function! s:GetBeginningWhitespace( lineNum ) " {{{2
-    return matchstr( getline(a:lineNum), '^\s\{-}\ze\($\|\S\|' . g:indentconsistencycop_non_indent_pattern . '\)' )
+    return matchstr(getline(a:lineNum), s:beginningWhitespacePrefix . '^\s\{-}\ze\($\|\S\|' . g:indentconsistencycop_non_indent_pattern . '\)')
 endfunction
 
 function! s:UpdateIndentMinMax( beginningWhitespace ) " {{{2
@@ -945,8 +991,10 @@ function! s:NormalizeRatings() " {{{2
 "* INPUTS:
 "   none
 "* RETURN VALUES:
-"   none
+"   Flag whether any perfect or authoritative rating was cleared.
 "*******************************************************************************
+    let l:hadPerfectOrAuthoritativeRating = 0
+
     " A perfect or authoritative rating (i.e. an indent setting that is
     " consistent throughout the entire buffer / range) is only accepted if its
     " absolute rating number is also the maximum rating. Without this
@@ -962,12 +1010,17 @@ function! s:NormalizeRatings() " {{{2
 	call s:NormalizeAuthoritativeRating()
     else
 	" Any perfect or authoritative ratings didn't pass the majority rule, so
-	" clear them here to signal a definite inconsistency.
+	" clear them here to signal a definite inconsistency, but return a flag
+	" to allow s:IsBufferConsistentWithBufferSettings() to later turn around
+	" this verdict by examining the buffer settings.
+	let l:hadPerfectOrAuthoritativeRating = (! empty(s:perfectIndentSetting) || ! empty(s:authoritativeIndentSetting))
 	let s:perfectIndentSetting = ''
 	let s:authoritativeIndentSetting = ''
 
 	call s:NormalizeNonPerfectRating()
     endif
+
+    return l:hadPerfectOrAuthoritativeRating
 endfunction
 
 " }}}1
@@ -1018,7 +1071,7 @@ function! s:CheckBufferConsistency( startLineNum, endLineNum ) " {{{1
 
     " No need to continue if no indents were found.
     if s:indentMax == 0
-	return -1
+	return [-1, 0]
     endif
 
     " s:tabstops need not be evaluated into occurrences, as there are no
@@ -1066,7 +1119,7 @@ function! s:CheckBufferConsistency( startLineNum, endLineNum ) " {{{1
 "****D echo 'Raw   Ratings:' . string( s:ratings )
 "****D let l:debugIndentSettings = s:perfectIndentSetting . s:authoritativeIndentSetting | if ! empty(l:debugIndentSettings) | echo 'Found' (empty(s:perfectIndentSetting) ? 'authoritative' : 'perfect') 'indent setting before normalization. ' | endif
 
-    call s:NormalizeRatings()
+    let l:hadPerfectOrAuthoritativeRating = s:NormalizeRatings()
 "****D echo 'Norm. Ratings:' . string( s:ratings )
 "****D let l:debugIndentSettings = s:perfectIndentSetting . s:authoritativeIndentSetting | if ! empty(l:debugIndentSettings) | echo '  ...' (empty(s:perfectIndentSetting) ? 'authoritative' : 'perfect') 'indent setting after normalization. ' | endif
 "****D call confirm('debug')
@@ -1083,7 +1136,7 @@ function! s:CheckBufferConsistency( startLineNum, endLineNum ) " {{{1
 
     let l:isConsistent = ! empty( s:perfectIndentSetting )
     if l:isConsistent && (count( s:ratings, 100 ) != 1) | throw 'ASSERT: If consistent, there should be a 100% rating. ' | endif
-    return l:isConsistent
+    return [l:isConsistent, l:hadPerfectOrAuthoritativeRating]
 endfunction
 
 
@@ -1655,10 +1708,7 @@ function! s:IsLineCorrect( lineNum, correctIndentSetting ) " {{{2
     endif
 endfunction
 
-function! IndentConsistencyCopFoldExpr( lineNum, foldContext ) " {{{2
-    " This function must be global; I could not get either s:FoldExpr() nor
-    " <SID>FoldExpr() resolved properly when setting 'foldexpr' to a
-    " script-local function.
+function! IndentConsistencyCop#FoldExpr( lineNum, foldContext ) " {{{2
     let l:lineCnt = a:lineNum - a:foldContext
     while l:lineCnt <= a:lineNum + a:foldContext
 	if index( b:indentconsistencycop_lineNumbers, l:lineCnt ) != -1
@@ -1759,19 +1809,34 @@ function! s:SetHighlighting( lineNumbers ) " {{{2
 	setlocal list
     endif
 
-    let l:foldContext = matchstr( g:indentconsistencycop_highlighting, 'f:\zs\d' )
+    let l:foldContext = matchstr( g:indentconsistencycop_highlighting, '\Cf:\zs\d' )
     if ! empty( l:foldContext )
 	" The list of lines to be highlighted is copied to a list with
 	" buffer-scope, because the (buffer-scoped) foldexpr needs access to it.
 	let b:indentconsistencycop_lineNumbers = copy( a:lineNumbers )
+
 	if ! exists( 'b:indentconsistencycop_save_foldexpr' )
 	    let b:indentconsistencycop_save_foldexpr = &l:foldexpr
 	endif
-	let &l:foldexpr='IndentConsistencyCopFoldExpr(v:lnum,' . l:foldContext . ')'
+	let &l:foldexpr='IndentConsistencyCop#FoldExpr(v:lnum,' . l:foldContext . ')'
+
+	" Close all folds, so that only the inconsistent lines (plus context
+	" around it) is visible.
+	if ! exists( 'b:indentconsistencycop_save_foldlevel' )
+	    let b:indentconsistencycop_save_foldlevel = &l:foldlevel
+	endif
+	setlocal foldlevel=0
+
 	if ! exists( 'b:indentconsistencycop_save_foldmethod' )
 	    let b:indentconsistencycop_save_foldmethod = &l:foldmethod
 	endif
 	setlocal foldmethod=expr
+
+	" Enable folding to be effective.
+	if ! &l:foldenable && ! exists( 'b:indentconsistencycop_save_foldenable' )
+	    let b:indentconsistencycop_save_foldenable = &l:foldenable
+	endif
+	setlocal foldenable
     endif
 endfunction
 
@@ -1810,18 +1875,30 @@ function! IndentConsistencyCop#ClearHighlighting() " {{{2
 	endif
     endif
 
-    if ! empty( matchstr( g:indentconsistencycop_highlighting, 'f:\zs\d' ) )
-	if exists( 'b:indentconsistencycop_lineNumbers' )
-	    " Just free the memory here.
-	    unlet b:indentconsistencycop_lineNumbers
+    if ! empty( matchstr( g:indentconsistencycop_highlighting, '\Cf:\zs\d' ) )
+	if exists( 'b:indentconsistencycop_save_foldenable' )
+	    let &l:foldenable = b:indentconsistencycop_save_foldenable
+	    unlet b:indentconsistencycop_save_foldenable
 	endif
+
 	if exists( 'b:indentconsistencycop_save_foldmethod' )
 	    let &l:foldmethod = b:indentconsistencycop_save_foldmethod
 	    unlet b:indentconsistencycop_save_foldmethod
 	endif
+
+	if exists( 'b:indentconsistencycop_save_foldlevel' )
+	    let &l:foldlevel = b:indentconsistencycop_save_foldlevel
+	    unlet b:indentconsistencycop_save_foldlevel
+	endif
+
 	if exists( 'b:indentconsistencycop_save_foldexpr' )
 	    let &l:foldexpr = b:indentconsistencycop_save_foldexpr
 	    unlet b:indentconsistencycop_save_foldexpr
+	endif
+
+	if exists( 'b:indentconsistencycop_lineNumbers' )
+	    " Just free the memory here.
+	    unlet b:indentconsistencycop_lineNumbers
 	endif
     endif
 endfunction
@@ -2106,8 +2183,6 @@ function! s:IsBufferConsistentWithBufferSettings( startLineNum, endLineNum ) " {
 "   small maximum indents.
 "* ASSUMPTIONS / PRECONDITIONS:
 "   A potential buffer inconsistency has been detected (s:CheckBufferConsistency() == 0).
-"   Consistency with the buffer settings should also be checked
-"	(a:isBufferSettingsCheck == 1).
 "* EFFECTS / POSTCONDITIONS:
 "	? List of the procedure's effect on each external variable, control, or other element.
 "* INPUTS:
@@ -2118,21 +2193,19 @@ function! s:IsBufferConsistentWithBufferSettings( startLineNum, endLineNum ) " {
 "	"consistent" by examining the buffer settings.
 "   0 if the verdict is still "inconsistent".
 "*******************************************************************************
-    if ! s:IsEnoughIndentForSolidAssessment()
-	let l:bufferIndentSetting = s:GetIndentSettingForBufferSettings()
-	if ! s:IsBadIndentSetting( l:bufferIndentSetting )
-	    let l:lineNumbers = s:GetInconsistentIndents( a:startLineNum, a:endLineNum, l:bufferIndentSetting )
-	    if len( l:lineNumbers ) == 0
-		" All lines conform to the buffer indent setting, nothing is
-		" inconsistent.
-		return 1
-	    endif
-	    " Inconsistent lines found.
+    let l:bufferIndentSetting = s:GetIndentSettingForBufferSettings()
+    if ! s:IsBadIndentSetting( l:bufferIndentSetting )
+	let l:lineNumbers = s:GetInconsistentIndents( a:startLineNum, a:endLineNum, l:bufferIndentSetting )
+	if len( l:lineNumbers ) == 0
+	    " All lines conform to the buffer indent setting, nothing is
+	    " inconsistent.
+	    return 1
 	endif
-	" The buffer settings are of no help, because they are inconsistent,
-	" too.
+	" Inconsistent lines found.
     endif
-    " We definitely have inconsistencies.
+    " The buffer settings are of no help, because they are inconsistent,
+    " too.
+
     return 0
 endfunction
 
@@ -2159,7 +2232,7 @@ function! IndentConsistencyCop#IndentConsistencyCop( startLineNum, endLineNum, i
 
     let s:occurrences = {}
     let s:ratings = {}
-    let l:isConsistent = s:CheckBufferConsistency( a:startLineNum, a:endLineNum )
+    let [l:isConsistent, l:hadPerfectOrAuthoritativeRating] = s:CheckBufferConsistency( a:startLineNum, a:endLineNum )
     call s:ReportConsistencyResult( l:isEntireBuffer, l:isConsistent, '' )
     call s:ReportBufferSettingsConsistency('')
 
@@ -2168,10 +2241,10 @@ function! IndentConsistencyCop#IndentConsistencyCop( startLineNum, endLineNum, i
 	call s:UnindentedBufferConsistencyCop( l:isEntireBuffer, a:isBufferSettingsCheck )
 	call s:ReportConsistencyWithBufferSettingsResult( l:isEntireBuffer, 1 )
     elseif l:isConsistent == 0
-	if a:isBufferSettingsCheck
+	if l:hadPerfectOrAuthoritativeRating || ! s:IsEnoughIndentForSolidAssessment()
 	    let l:isConsistent = s:IsBufferConsistentWithBufferSettings( a:startLineNum, a:endLineNum )
-	    call s:ReportConsistencyWithBufferSettingsResult( l:isEntireBuffer, l:isConsistent )
 	endif
+	call s:ReportConsistencyWithBufferSettingsResult( l:isEntireBuffer, l:isConsistent )
 	if l:isConsistent
 	    call IndentConsistencyCop#ClearHighlighting()
 
