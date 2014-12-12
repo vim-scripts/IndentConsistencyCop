@@ -1,6 +1,8 @@
 " IndentConsistencyCop.vim: Is the buffer's indentation consistent and does it conform to tab settings?
 "
 " DEPENDENCIES:
+"   - ingo/plugin/setting.vim autoload script
+"   - ingo/query.vim autoload script
 "
 " Copyright: (C) 2006-2014 Ingo Karkat
 "   The VIM LICENSE applies to this script; see ':help copyright'.
@@ -8,6 +10,14 @@
 " Maintainer:	Ingo Karkat <ingo@karkat.de>
 "
 " REVISION	DATE		REMARKS  {{{1
+"   1.45.014	12-Dec-2014	Minor: Highlight action checks are dependent on
+"				'iskeyword' setting, and could cause script
+"				errors.
+"   1.45.013	30-Apr-2014	Consume
+"				ingo#plugin#setting#BooleanToStringValue() from
+"				ingo-library.
+"				Factor out ingo#query#ConfirmAsText() to
+"				ingo-library.
 "   1.44.012	08-Jan-2014	Move workaround of forcing old regexp engine to
 "				s:GetBeginningWhitespace().
 "				ENH: Close all consistent parts of the buffer
@@ -1283,10 +1293,6 @@ function! s:GetCorrectExpandtabSetting( indentSetting ) " {{{2
     return (s:GetSettingFromIndentSetting( a:indentSetting ) == 'spc')
 endfunction
 
-function! s:BooleanToSettingNoSetting( settingName, settingValue )
-    return a:settingValue ? a:settingName : 'no' . a:settingName
-endfunction
-
 function! s:CheckConsistencyWithBufferSettings( indentSetting ) " {{{2
 "*******************************************************************************
 "* PURPOSE:
@@ -1324,7 +1330,7 @@ function! s:CheckConsistencyWithBufferSettings( indentSetting ) " {{{2
 	    let l:userString .= "\n- shiftwidth from " . &l:shiftwidth . ' to ' . s:GetCorrectShiftwidthSetting( a:indentSetting )
 	endif
 	if ! l:isExpandtabCorrect
-	    let l:userString .= "\n- " . s:BooleanToSettingNoSetting( 'expandtab', &l:expandtab ) . ' to ' . s:BooleanToSettingNoSetting( 'expandtab', s:GetCorrectExpandtabSetting( a:indentSetting ) )
+	    let l:userString .= "\n- " . ingo#plugin#setting#BooleanToStringValue('expandtab') . ' to ' . ingo#plugin#setting#BooleanToStringValue('expandtab', s:GetCorrectExpandtabSetting(a:indentSetting))
 	endif
 
 	let l:userString .= s:GetInsufficientIndentUserMessage()
@@ -1583,7 +1589,7 @@ function! s:UnindentedBufferConsistencyCop( isEntireBuffer, isBufferSettingsChec
 	if ! empty( l:userMessage )
 	    let l:userMessage = 'This ' . s:GetScopeUserString(a:isEntireBuffer) . ' does not contain indented text. ' . l:userMessage
 	    let l:userMessage .= "\nHow do you want to deal with the inconsistency?"
-	    let l:action = s:Query( l:userMessage, ['&Ignore', '&Correct setting...'], 1 )
+	    let l:action = ingo#query#ConfirmAsText(l:userMessage, ['&Ignore', '&Correct setting...'], 1, 'Question')
 	    if empty(l:action) || l:action ==? 'Ignore'
 		call s:PrintBufferSettings( 'The buffer settings remain inconsistent: ' )
 	    elseif l:action =~? '^Correct'
@@ -1654,7 +1660,7 @@ function! s:IndentBufferConsistencyCop( startLineNum, endLineNum, consistentInde
 	    let l:userMessage .= "\nHow do you want to deal with the "
 	    let l:userMessage .= (s:IsEnoughIndentForSolidAssessment() ? '' : 'potential ')
 	    let l:userMessage .= 'inconsistency?'
-	    let l:action = s:Query(l:userMessage, ['&Ignore', '&Change', '&Wrong, choose correct setting...'], 1)
+	    let l:action = ingo#query#ConfirmAsText(l:userMessage, ['&Ignore', '&Change', '&Wrong, choose correct setting...'], 1, 'Question')
 	    if empty(l:action) || l:action ==? 'Ignore'
 		call s:PrintBufferSettings( 'The buffer settings remain ' . (s:IsEnoughIndentForSolidAssessment() ? 'inconsistent' : 'at') . ': ' )
 	    elseif l:action ==? 'Change'
@@ -1971,11 +1977,11 @@ function! s:QueryIndentSetting() " {{{2
 "* RETURN VALUES:
 "   Queried indent setting (e.g. 'spc4'), or empty string if user has canceled.
 "*******************************************************************************
-    let l:setting = s:Query('Choose the indent setting:', ['&tabstop', '&soft tabstop', 'spa&ces'], 0)
+    let l:setting = ingo#query#ConfirmAsText('Choose the indent setting:', ['&tabstop', '&soft tabstop', 'spa&ces'], 0, 'Question')
     if empty(l:setting)
 	return ''
     elseif l:setting !=? 'tabstop'
-	let l:indentValue = s:Query('Choose indent value:', ['&1', '&2', '&3', '&4', '&5', '&6', '&7', '&8'], 0 )
+	let l:indentValue = ingo#query#ConfirmAsText('Choose indent value:', ['&1', '&2', '&3', '&4', '&5', '&6', '&7', '&8'], 0, 'Question')
 	if empty(l:indentValue)
 	    return ''
 	endif
@@ -2112,7 +2118,7 @@ function! s:IndentBufferInconsistencyCop( startLineNum, endLineNum, inconsistent
 "* RETURN VALUES:
 "   none
 "*******************************************************************************
-    let l:action = s:Query(a:inconsistentIndentationMessage, ['&Ignore', '&Highlight wrong indents...'], 1)
+    let l:action = ingo#query#ConfirmAsText(a:inconsistentIndentationMessage, ['&Ignore', '&Highlight wrong indents...'], 1, 'Question')
     let b:indentconsistencycop_result.isIgnore = (l:action ==# 'Ignore')
     if empty(l:action) || l:action ==# 'Ignore'
 	" User chose to ignore the inconsistencies.
@@ -2144,15 +2150,15 @@ function! s:IndentBufferInconsistencyCop( startLineNum, endLineNum, inconsistent
 	    call add(l:highlightChoices, '&Illegal indents only')
 	endif
 
-	let l:highlightAction = s:Query(l:highlightMessage, l:highlightChoices, 1)
+	let l:highlightAction = ingo#query#ConfirmAsText(l:highlightMessage, l:highlightChoices, 1, 'Question')
 	if empty(l:highlightAction)
 	    " User canceled.
 	    call s:EchoUserMessage('Be careful when modifying the inconsistent indents! ')
-	elseif l:highlightAction =~? '\<buffer settings\>'
+	elseif l:highlightAction =~? 'buffer settings'
 	    call s:HighlightInconsistentIndents( a:startLineNum, a:endLineNum, l:bufferIndentSetting )
-	elseif l:highlightAction =~? '\<best guess\>'
+	elseif l:highlightAction =~? 'best guess'
 	    call s:HighlightInconsistentIndents( a:startLineNum, a:endLineNum, l:bestGuessIndentSetting )
-	elseif l:highlightAction =~? '\<chosen setting\>'
+	elseif l:highlightAction =~? 'chosen setting'
 	    let l:chosenIndentSetting = s:QueryIndentSetting()
 	    if ! empty( l:chosenIndentSetting )
 		call s:HighlightInconsistentIndents( a:startLineNum, a:endLineNum, l:chosenIndentSetting )
